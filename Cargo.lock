@@ -24,6 +24,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "injectum_early_bird"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "injectum_hollowing"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "injectum_thread_hijacking"
 version = "0.1.0"
 dependencies = [
