@@ -18,6 +18,6 @@ To build the example:
 cargo build --example alertable_thread --release
 ```
 
-This generates a binary in target/x86_64-pc-windows-gnu/release/examples/alertable_thread.exe that can be run to create a process with an alertable thread for testing APC injection.
+This generates a binary in `target/x86_64-pc-windows-gnu/release/examples/alertable_thread.exe` that can be run to create a process with an alertable thread for testing APC injection.
 
 [Back to the main README](../README.md)
