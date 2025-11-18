@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "injectum_async_procedure_calls"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "injectum_classic"
 version = "0.1.0"
 dependencies = [

@@ -14,9 +14,10 @@ This repository is intended to showcase practical red team capabilities in a con
 
 | Crate | Description |
 |-------|------------|
-| [injectum_classic](injectum_classic/README.md) | Classic process injection example. |
-| [injectum_classic_remote](injectum_classic_remote/README.md) | Classic Remote process injection example. |
-| [injectum_thread_hijacking](injectum_thread_hijacking/README.md) | Thread Hijacking process injection example. |
+| [injectum_classic](injectum_classic/README.md) | Classic injection using `VirtualAlloc` and `CreateThread`. |
+| [injectum_classic_remote](injectum_classic_remote/README.md) | Remote process injection targeting a PID with `OpenProcess` and `CreateRemoteThread`. |
+| [injectum_thread_hijacking](injectum_thread_hijacking/README.md) | Hijacks a thread by modifying its context before resuming execution. |
+| [injectum_async_procedure_calls](injectum_async_procedure_calls/README.md) | Queues a payload via an APC on an existing thread in alertable state. |
 
 ## Getting Started
 
