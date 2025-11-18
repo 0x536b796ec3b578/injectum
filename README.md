@@ -19,6 +19,7 @@ This repository is intended to showcase practical red team capabilities in a con
 | [injectum_thread_hijacking](injectum_thread_hijacking/README.md) | Hijacks a thread by modifying its context before resuming execution. |
 | [injectum_async_procedure_calls](injectum_async_procedure_calls/README.md) | Queues a payload via an APC on an existing thread in alertable state. |
 | [injectum_early_bird](injectum_early_bird/README.md) | Schedules an APC on a process’s primary thread before it starts running. |
+| [injetum_hollowing](injetum_hollowing/README.md) | Redirects a suspended process’s execution to custom shellcode by overwriting its entry point. |
 
 
 ## Getting Started
