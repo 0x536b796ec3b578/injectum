@@ -30,6 +30,7 @@ full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_
 # T1055.001: Dynamic-link Library Injection
 T1055_001 = [
     "dep:windows-sys",
+    "windows-sys/Win32_Security",
     "windows-sys/Win32_System_Diagnostics_Debug",
     "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_System_Memory",

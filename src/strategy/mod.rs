@@ -45,6 +45,7 @@ use crate::{error::InjectumError, payload::Payload, target::Target};
 /// Enumeration of supported MITRE ATT&CK T1055 sub-techniques.
 ///
 /// Variants are conditionally compiled based on feature flags and the target OS.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Technique {
     /// T1055.001: Dynamic-link Library Injection
