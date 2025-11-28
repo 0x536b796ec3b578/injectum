@@ -14,7 +14,6 @@
 </p>
 
 <p align="center">
-<a href="#overview">Overview</a> •
 <a href="#architecture">Architecture</a> •
 <a href="#how-it-works">How It Works</a> •
 <a href="#installation">Installation</a> •
