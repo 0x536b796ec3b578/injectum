@@ -1,6 +1,19 @@
 [build]
-target = "x86_64-pc-windows-gnu"
+target = "x86_64-pc-windows-msvc"
 
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-ar = "x86_64-w64-mingw32-gcc-ar"
+[target.x86_64-pc-windows-msvc]
+# Static Linking: Keeps the binary standalone (portable to any Windows machine).
+# Keep this enabled for both Windows and Linux.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# ------------------------------------------------- #
+# LINKER CONFIGURATION (Edit this based on your OS) #
+# ------------------------------------------------- #
+
+# OPTION 1: LINUX USERS (Cross-Compilation)
+# Keep this uncommented. Requires LLD installed.
+# linker = "lld-link"
+
+# OPTION 2: WINDOWS USERS (Native)
+# Comment out the line above (linker = "lld-link").
+# Windows uses the default MSVC linker automatically.
