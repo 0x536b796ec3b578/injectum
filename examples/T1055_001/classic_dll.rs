@@ -1,7 +1,4 @@
-//! Example: T1055.001 - DLL Injection
-//!
-//! Demonstrates a classic DLL injection by specifying a target process ID (PID)
-//! and the path to a DLL file.
+//! Example: T1055.001 - Classic DLL Injection
 //!
 //! ## Requirements
 //! - **Operating System**: Windows
@@ -10,12 +7,12 @@
 //! ## Build
 //! You can build this example with the following command:
 //! ```sh
-//! cargo build --package injectum --example T1055_001_DLL_Injection --features "tracing,T1055_001" --release
+//! cargo build --package injectum --example T1055_001_Classic_DLL --features "tracing,T1055_001" --release
 //! ```
 //!
 //! ## Usage
 //! ```sh
-//! ./T1055_001_DLL_Injection.exe <PID> <DLL_PATH>
+//! ./T1055_001_Classic_DLL.exe <PID> <DLL_PATH>
 //! ```
 
 use injectum::{
@@ -54,7 +51,7 @@ fn run() -> Result<(), InjectumError> {
     info!("------------------------------------------------");
     info!("Target Process ID : {}", pid);
     info!("Payload Path      : {:?}", dll_path);
-    info!("Technique         : T1055.001 (DLLInjection)");
+    info!("Technique         : T1055.001 (ClassicDLLInjection)");
     info!("------------------------------------------------");
 
     inject_dll(pid, dll_path)?;
@@ -76,7 +73,7 @@ fn inject_dll(pid: u32, path: PathBuf) -> Result<(), InjectumError> {
     };
 
     let target = Target::Pid(pid);
-    let strategy = StrategyType::new(Technique::T1055_001, Some("DLLInjection"));
+    let strategy = StrategyType::new(Technique::T1055_001, Some("ClassicDLLInjection"));
 
     InjectorBuilder::new()
         .target(target)
@@ -135,5 +132,5 @@ fn setup_logging() {
 
 fn print_usage() {
     println!("Usage:");
-    println!("  T1055_001_DLL_Injection.exe <PID> <DLL_PATH>");
+    println!("  T1055_001_Classic_DLL.exe <PID> <DLL_PATH>");
 }

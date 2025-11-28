@@ -30,7 +30,6 @@ full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_
 # T1055.001: Dynamic-link Library Injection
 T1055_001 = [
     "dep:windows-sys",
-    "windows-sys/Win32_Security",
     "windows-sys/Win32_System_Diagnostics_Debug",
     "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_System_Memory",
@@ -38,9 +37,21 @@ T1055_001 = [
 ]
 
 # T1055.002: Portable Executable Injection
-T1055_002 = []
+T1055_002 = [
+    "dep:windows-sys",
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_Threading"
+]
 T1055_003 = []
-T1055_004 = []
+# T1055.004: Asynchronous Procedure Call
+T1055_004 = [
+    "dep:windows-sys",
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Diagnostics_ToolHelp",
+    "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_Threading",
+]
 T1055_005 = []
 T1055_008 = []
 T1055_009 = []
@@ -57,9 +68,24 @@ windows-sys = { version = "0.61.2", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+# windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [[example]]
-name = "T1055_001_DLL_Injection"
-path = "examples/T1055_001/dll_injection.rs"
+name = "T1055_001_Classic_DLL"
+path = "examples/T1055_001/classic_dll.rs"
 required-features = ["T1055_001"]
+
+[[example]]
+name = "T1055_002_Remote_Thread"
+path = "examples/T1055_002/remote_thread.rs"
+required-features = ["T1055_002"]
+
+[[example]]
+name = "T1055_004_Sniper_APC"
+path = "examples/T1055_004/sniper_apc.rs"
+required-features = ["T1055_004"]
+
+[[example]]
+name = "T1055_004_Spray_APC"
+path = "examples/T1055_004/spray_apc.rs"
+required-features = ["T1055_004"]

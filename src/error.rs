@@ -52,6 +52,10 @@ pub enum InjectumError {
     /// Invalid arguments provided to the library.
     #[error("{0}")]
     Argument(String),
+
+    /// Used for logic failures like "No threads found".
+    #[error("{0}")]
+    General(String),
 }
 
 impl std::fmt::Debug for InjectumError {
