@@ -1,6 +1,6 @@
 [package]
 name = "injectum"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
@@ -70,7 +70,6 @@ windows-sys = { version = "0.61.2", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-# windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [[example]]
 name = "T1055_001_Classic_DLL"
@@ -90,4 +89,9 @@ required-features = ["T1055_004"]
 [[example]]
 name = "T1055_004_Spray_APC"
 path = "examples/T1055_004/spray_apc.rs"
+required-features = ["T1055_004"]
+
+[[example]]
+name = "T1055_004_Early_Bird"
+path = "examples/T1055_004/early_bird.rs"
 required-features = ["T1055_004"]
