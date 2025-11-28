@@ -116,6 +116,3 @@ mod stealth {
         ($($arg:tt)*) => {};
     }
 }
-
-#[cfg(not(feature = "tracing"))]
-pub(crate) use stealth::*;
