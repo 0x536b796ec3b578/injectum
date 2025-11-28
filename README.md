@@ -1,7 +1,7 @@
 <h1 align="center">Injectum</h1>
 
 <p align="center">
-<em>The modern, type-safe framework for offensive process injection in Rust.</em>
+<em>The modern, type-safe process injection framework for Red Teams and Offensive Security in Rust.</em>
 </p>
 
 <p align="center">
