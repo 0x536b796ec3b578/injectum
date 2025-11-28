@@ -1,0 +1,65 @@
+[package]
+name = "injectum"
+version = "0.1.0"
+authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
+edition = "2024"
+repository = "https://github.com/0x536b796ec3b578/injectum"
+license = "MIT"
+description = "The modern, type-safe framework for offensive process injection in Rust."
+readme = "README.md"
+keywords = [
+    "security",
+    "malware",
+    "redteam",
+    "mitre",
+    "windows"
+]
+categories = [
+    "security",
+    "os::windows-apis",
+    "simulation",
+    "algorithms",
+    "api-bindings"
+]
+
+[features]
+default = ["tracing"]
+tracing = ["dep:tracing"]
+full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_008", "T1055_009", "T1055_011", "T1055_012", "T1055_013", "T1055_014", "T1055_015"]
+
+# T1055.001: Dynamic-link Library Injection
+T1055_001 = [
+    "dep:windows-sys",
+    "windows-sys/Win32_Security",
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_LibraryLoader",
+    "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_Threading"
+]
+
+# T1055.002: Portable Executable Injection
+T1055_002 = []
+T1055_003 = []
+T1055_004 = []
+T1055_005 = []
+T1055_008 = []
+T1055_009 = []
+T1055_011 = []
+T1055_012 = []
+T1055_013 = []
+T1055_014 = []
+T1055_015 = []
+
+[dependencies]
+thiserror = "2.0.17"
+tracing = { version = "0.1.42", optional = true }
+windows-sys = { version = "0.61.2", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3.21", features = ["env-filter"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "T1055_001_DLL_Injection"
+path = "examples/T1055_001/dll_injection.rs"
+required-features = ["T1055_001"]
