@@ -1,6 +1,6 @@
 [package]
 name = "injectum"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
@@ -40,6 +40,7 @@ T1055_001 = [
 # T1055.002: Portable Executable Injection
 T1055_002 = [
     "dep:windows-sys",
+    "windows-sys/Win32_Security",
     "windows-sys/Win32_System_Diagnostics_Debug",
     "windows-sys/Win32_System_Memory",
     "windows-sys/Win32_System_Threading"
