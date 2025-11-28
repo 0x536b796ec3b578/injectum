@@ -21,8 +21,6 @@
 use injectum::{
     InjectorBuilder, InjectumError, Payload, PayloadMetadata, StrategyType, Target, Technique,
 };
-use std::io::Write;
-use std::process;
 use std::{env::args, path::PathBuf};
 
 #[cfg(feature = "tracing")]
@@ -42,23 +40,14 @@ mod logs {
 
 /// Program entry point.
 fn main() {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("\n[!] CRITICAL PANIC: {}", info);
-    }));
-    setup_logging();
     if let Err(e) = run() {
-        #[cfg(feature = "tracing")]
         error!("{}", e);
-
-        eprintln!("\n[!] Fatal Error: {}", e);
-        let _ = std::io::stderr().flush();
-        process::exit(1);
     }
 }
 
 /// Orchestrates the injection workflow.
 fn run() -> Result<(), InjectumError> {
-    // setup_logging();
+    setup_logging();
 
     let (pid, dll_path) = parse_args()?;
 
