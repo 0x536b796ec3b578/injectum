@@ -10,7 +10,7 @@
 //! ## Build
 //! You can build this example with the following command:
 //! ```sh
-//! cargo (xwin) build --package injectum --example T1055_001_DLL_Injection --features "tracing,T1055_001" --release
+//! cargo build --package injectum --example T1055_001_DLL_Injection --features "tracing,T1055_001" --release
 //! ```
 //!
 //! ## Usage

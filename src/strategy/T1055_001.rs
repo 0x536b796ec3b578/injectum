@@ -94,14 +94,14 @@ impl Strategy for T1055_001 {
 
         let variant: InjectionMethod = method.try_into()?;
 
-        // 2. Enforce "DLLInjection" method only
+        // 2. Enforce "DLLInjection" method only for now
         match variant {
             InjectionMethod::DLLInjection => {
                 info!("Method: DLL Injection");
-                inject_classic(pid, dll_path)
+                dll_injection(pid, dll_path)
             }
             _ => Err(InjectumError::MethodNotSupported(format!(
-                "Method '{}' is not supported in this simplified version. Use 'Classic'.",
+                "Method '{}' is not supported in this simplified version. Use 'DLLInjection'.",
                 method.0
             ))),
         }
@@ -126,8 +126,8 @@ impl Drop for HandleGuard {
 }
 
 /// [DLL Injection]
-fn inject_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
-    // Convert the Path to a UTF-16 null-terminated wide string (required by Windows APIs).
+fn dll_injection(pid: u32, path: &Path) -> Result<(), InjectumError> {
+    // 1. Convert the Path to a UTF-16 null-terminated wide string (required by Windows APIs).
     let wide_path = to_utf16_null_terminated(path);
     let size_in_bytes = wide_path.len() * 2;
 
@@ -170,7 +170,7 @@ fn inject_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
         }));
     }
 
-    // 4. Write Memory
+    // 4. Write to Memory
     let mut bytes_written: usize = 0;
 
     let write_success = unsafe {
