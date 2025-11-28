@@ -1,14 +1,27 @@
-# Injectum
-*The modern, type-safe framework for offensive process injection in Rust.*
+<h1 align="center">Injectum</h1>
 
-<p align="center"> <a href="#overview">Overview</a> • <a href="#architecture">Architecture</a> • <a href="#how-it-works">How It Works</a> • <a href="#installation">Installation</a> • <a href="#build-instructions">Build</a> • <a href="#roadmap---mitre-attck-process-injection-t1055">Roadmap</a> • <a href="#contributing">Contributing</a> </p>
-<p align="center"> [![Crates.io][crates-badge]][crates-url]
-[![MIT licensed][mit-badge]][mit-url] <p>
+<p align="center">
+<em>The modern, type-safe framework for offensive process injection in Rust.</em>
+</p>
 
-[crates-badge]: https://img.shields.io/crates/v/injectum.svg
-[crates-url]: https://crates.io/crates/injectum
-[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[mit-url]: https://github.com/0x536b796ec3b578/injectum/blob/main/LICENSE
+<p align="center">
+<a href="https://crates.io/crates/injectum">
+<img src="https://img.shields.io/crates/v/injectum.svg" alt="Crates.io">
+</a>
+<a href="https://github.com/0x536b796ec3b578/injectum/blob/main/LICENSE">
+<img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT Licensed">
+</a>
+</p>
+
+<p align="center">
+<a href="#overview">Overview</a> •
+<a href="#architecture">Architecture</a> •
+<a href="#how-it-works">How It Works</a> •
+<a href="#installation">Installation</a> •
+<a href="#build-instructions">Build</a> •
+<a href="#roadmap---mitre-attck-process-injection-t1055">Roadmap</a> •
+<a href="#contributing">Contributing</a>
+</p>
 
 ## Overview
 **Injectum** is a modular, type-safe Rust library for process injection in Rust. It abstracts away the headache of platform-specific implementations so you can focus on the strategy.
