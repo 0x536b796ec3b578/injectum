@@ -5,7 +5,7 @@ authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
 license = "MIT"
-description = "The modern, type-safe framework for offensive process injection in Rust."
+description = "The modern, type-safe process injection framework for Red Teams and Offensive Security in Rust."
 readme = "README.md"
 keywords = [
     "security",
