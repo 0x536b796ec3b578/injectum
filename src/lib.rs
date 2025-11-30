@@ -89,8 +89,9 @@
 //!
 //! ```toml
 //! [features]
-//! default   = ["tracing", "full"]
+//! default   = []
 //! tracing   = [] # Enable structured logging via the `tracing` crate
+//! full      = [] # Activates all techniques at once
 //!
 //! # MITRE ATT&CK Techniques
 //! T1055_001 = [] # Dynamic-link Library Injection (Windows)
