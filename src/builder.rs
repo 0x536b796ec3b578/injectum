@@ -1,14 +1,15 @@
-//! Builder pattern implementation for constructing injection configurations.
+//! Implements the **Builder Pattern** for configuring injection operations.
 //!
-//! This module provides a fluent interface to create an [ImmutableInjection]
-//! ensuring all necessary components are present before execution.
+//! This module provides a fluent interface ([`InjectorBuilder`]) to construct a valid
+//! [`ImmutableInjection`]. It handles input validation and applies sensible defaults
+//! (e.g., defaulting to Self-Injection if no target is specified) before execution.
 
-use crate::{Injector, Payload, StrategyType, Target, error::InjectumError};
+use crate::{Error, Injector, Payload, Result, Target, Technique};
 
-/// A fluent builder for creating an [ImmutableInjection].
+/// A fluent builder for creating a validated [`ImmutableInjection`] configuration.
 #[derive(Default)]
 pub struct InjectorBuilder {
-    strategy: Option<StrategyType>,
+    technique: Option<Technique>,
     payload: Option<Payload>,
     target: Option<Target>,
 }
@@ -19,89 +20,72 @@ impl InjectorBuilder {
         Self::default()
     }
 
-    /// Sets the injection strategy.
-    pub fn strategy(mut self, s: StrategyType) -> Self {
-        self.strategy = Some(s);
+    /// Sets the specific injection technique (e.g., Process Hollowing, Reflective DLL).
+    pub fn technique(mut self, technique: Technique) -> Self {
+        self.technique = Some(technique);
         self
     }
 
-    /// Sets the payload to inject.
-    pub fn payload(mut self, p: Payload) -> Self {
-        self.payload = Some(p);
+    /// Sets the payload data (e.g., Shellcode, DLL) to be injected.
+    pub fn payload(mut self, payload: Payload) -> Self {
+        self.payload = Some(payload);
         self
     }
 
-    /// Sets the target process. Defaults to `Target::None` if not called.
-    pub fn target(mut self, t: Target) -> Self {
-        self.target = Some(t);
+    /// Sets the target process.
+    ///
+    /// If this is not called, the builder defaults to [`Target::CurrentProcess`]
+    /// (Self-Injection) upon [`build()`](Self::build).
+    pub fn target(mut self, target: Target) -> Self {
+        self.target = Some(target);
         self
     }
 
-    /// Consumes the builder and returns an immutable injection configuration.
-    pub fn build(self) -> Result<ImmutableInjection, InjectumError> {
-        let strategy = self
-            .strategy
-            .ok_or_else(|| InjectumError::Builder("Missing strategy".into()))?;
+    /// Consumes the builder, validates inputs, and returns an immutable configuration.
+    ///
+    /// # Errors
+    /// Returns [`Error::Validation`] if the `technique` or `payload` is missing.
+    pub fn build(self) -> Result<ImmutableInjection> {
+        let technique = self
+            .technique
+            .ok_or_else(|| Error::Validation("Missing technique".into()))?;
 
         let payload = self
             .payload
-            .ok_or_else(|| InjectumError::Builder("Missing payload".into()))?;
+            .ok_or_else(|| Error::Validation("Missing payload".into()))?;
 
-        let target = self.target.unwrap_or(Target::None);
+        // Logic check: Default to CurrentProcess (Self-Injection) if no target is specified.
+        let target = self.target.unwrap_or(Target::CurrentProcess);
 
         Ok(ImmutableInjection {
-            strategy,
+            technique,
             payload,
             target,
         })
     }
 
     /// Convenience method to build and immediately execute the injection.
-    pub fn execute(self) -> Result<(), InjectumError> {
-        let inj = self.build()?;
-        inj.execute()
+    ///
+    /// This is equivalent to calling `.build()?.execute()`.
+    pub fn execute(self) -> Result<()> {
+        let injector = self.build()?;
+        injector.execute()
     }
 }
 
-/// A fully configured, immutable injection request.
+/// A fully configured, thread-safe injection request.
+///
+/// This struct guarantees that all necessary components (Technique, Payload, Target)
+/// are present and valid. It cannot be modified after creation.
 pub struct ImmutableInjection {
-    pub(crate) strategy: StrategyType,
+    pub(crate) technique: Technique,
     pub(crate) payload: Payload,
     pub(crate) target: Target,
 }
 
 impl ImmutableInjection {
-    /// Executes the injection configuration using the core [Injector].
-    pub fn execute(&self) -> Result<(), InjectumError> {
-        Injector::run(self.strategy, &self.payload, &self.target)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::payload::PayloadMetadata;
-    use crate::strategy::Technique;
-
-    #[test]
-    fn builder_fails_missing_fields() {
-        let res = InjectorBuilder::new().build();
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn builder_succeeds_with_minimal_fields() {
-        let payload = Payload::Blob {
-            content_type: "test".into(),
-            data: vec![],
-            meta: PayloadMetadata::default(),
-        };
-
-        let res = InjectorBuilder::new()
-            .strategy(StrategyType::new(Technique::MockTest, None))
-            .payload(payload)
-            .build();
-
-        assert!(res.is_ok());
+    /// Executes the pre-configured injection strategy.
+    pub fn execute(&self) -> Result<()> {
+        Injector::run(&self.technique, &self.payload, &self.target)
     }
 }

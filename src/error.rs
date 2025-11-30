@@ -1,65 +1,63 @@
-//! Unified error handling for the library.
+//! Centralized error handling types for the library.
+//!
+//! This module leverages the `thiserror` crate to provide a unified [`Error`] enum
+//! that aggregates low-level OS failures (IO, Win32), logical inconsistencies
+//! (Validation, Mismatch), and runtime execution errors.
 
-use thiserror::Error;
+/// A convenience alias for `Result<T, Error>`.
+pub type Result<T> = std::result::Result<T, Error>;
 
-/// Enumeration of all possible errors that can occur during the injection lifecycle.
-#[derive(Error)]
-pub enum InjectumError {
-    /// Standard Input/Output errors.
+/// The exhaustive list of failure modes for the injection lifecycle.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// Wraps standard Input/Output failures (e.g., file not found, permission denied).
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
-    /// Returned when a Win32 API call fails.
-    /// Contains the function name and the error code (GetLastError).
+    /// A raw Operating System API failure.
+    ///
+    /// Contains the name of the failed function and the raw error code (decimal).
     #[error("Win32 API '{0}' failed with error code: {1}")]
-    Win32Error(&'static str, u32),
+    Win32(&'static str, u32),
 
-    /// Returned when a strategy requires a PID but none was provided.
-    #[error("Strategy '{0}' requires a Target PID.")]
-    PidRequired(&'static str),
+    /// The configuration or builder arguments are invalid (e.g., missing required fields).
+    #[error("Validation error: {0}")]
+    Validation(String),
 
-    /// Returned when the payload type doesn't match the strategy requirements.
-    #[error("Strategy '{strategy}' does not support payload type '{payload_type}'.")]
-    PayloadMismatch {
+    /// The payload binary is malformed or does not match the expected format.
+    ///
+    /// (e.g., Missing PE magic bytes, invalid sections).
+    #[error("Invalid image format: {0}")]
+    InvalidImage(String),
+
+    /// A logical error where the Strategy and Payload are incompatible.
+    ///
+    /// (e.g., Attempting 'Process Hollowing' using a raw 'Shellcode' payload)
+    #[error("Strategy '{strategy}' incompatible with payload type '{variant}'")]
+    Mismatch {
         strategy: &'static str,
-        payload_type: &'static str,
+        variant: &'static str,
     },
 
-    /// Returned when a specific method is requested but the feature is not compiled.
-    #[error("Method '{0}' is disabled in this build. Enable the feature '{1}' in Cargo.toml.")]
-    FeatureDisabled(String, String),
+    /// The requested functionality is disabled via Cargo features or not supported on this OS.
+    #[error("Capability unavailable: {0}")]
+    Unsupported(String),
 
-    /// Returned when a method string is unknown.
-    #[error("Unknown injection method: '{0}'.")]
-    MethodNotSupported(String),
-
-    /// Returned when trying to execute a strategy when no features are enabled.
-    #[error("No injection feature is enabled. Please enable at least one feature in Cargo.toml.")]
-    NoFeatureEnabled,
-
-    /// Malformed PE/DLL data.
-    #[error("Invalid PE Format: {0}")]
-    InvalidPe(String),
-
-    /// General failure during the execution phase (Win32 API failures, etc.).
-    #[error("{0}")]
-    ExecutionFailure(String),
-
-    /// Builder construction errors.
-    #[error("{0}")]
-    Builder(String),
-
-    /// Invalid arguments provided to the library.
-    #[error("{0}")]
-    Argument(String),
-
-    /// Used for logic failures like "No threads found".
-    #[error("{0}")]
-    General(String),
+    /// A generic runtime failure not covered by specific variants.
+    #[error("Execution failed: {0}")]
+    Execution(String),
 }
 
-impl std::fmt::Debug for InjectumError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+// Helper: Enables usage of `?` on String to convert automatically to Error::Execution.
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::Execution(s)
+    }
+}
+
+// Helper: Enables usage of `?` on &str to convert automatically to Error::Execution.
+impl From<&str> for Error {
+    fn from(s: &str) -> Self {
+        Error::Execution(s.to_string())
     }
 }

