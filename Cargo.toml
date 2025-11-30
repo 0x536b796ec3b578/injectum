@@ -1,6 +1,6 @@
 [package]
 name = "injectum"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
@@ -23,7 +23,7 @@ categories = [
 ]
 
 [features]
-default = ["tracing"]
+default = []
 tracing = ["dep:tracing"]
 full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_008", "T1055_009", "T1055_011", "T1055_012", "T1055_013", "T1055_014", "T1055_015"]
 
@@ -52,13 +52,26 @@ T1055_004 = [
     "windows-sys/Win32_System_Diagnostics_Debug",
     "windows-sys/Win32_System_Diagnostics_ToolHelp",
     "windows-sys/Win32_System_Memory",
-    "windows-sys/Win32_System_Threading",
+    "windows-sys/Win32_System_Threading"
 ]
 T1055_005 = []
 T1055_008 = []
 T1055_009 = []
 T1055_011 = []
-T1055_012 = []
+# T1055.012: Process Hollowing
+T1055_012 = [
+    "dep:windows-sys",
+    "windows-sys/Wdk_System_Memory",
+    "windows-sys/Wdk_System_Threading",
+    "windows-sys/Win32_Security",
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Kernel",
+    "windows-sys/Win32_System_LibraryLoader",
+    "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_SystemServices",
+    "windows-sys/Win32_System_SystemInformation",
+    "windows-sys/Win32_System_Threading"
+]
 T1055_013 = []
 T1055_014 = []
 T1055_015 = []
@@ -95,3 +108,13 @@ required-features = ["T1055_004"]
 name = "T1055_004_Early_Bird"
 path = "examples/T1055_004/early_bird.rs"
 required-features = ["T1055_004"]
+
+[[example]]
+name = "T1055_012_Process_Hollowing"
+path = "examples/T1055_012/process_hollowing.rs"
+required-features = ["T1055_012"]
+
+[[example]]
+name = "T1055_012_Entry_Point_Stomping"
+path = "examples/T1055_012/entry_point_stomping.rs"
+required-features = ["T1055_012"]
