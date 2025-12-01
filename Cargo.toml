@@ -1,6 +1,6 @@
 [package]
 name = "injectum"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
@@ -23,7 +23,7 @@ categories = [
 ]
 
 [features]
-default = []
+default = ["tracing"]
 tracing = ["dep:tracing"]
 full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_008", "T1055_009", "T1055_011", "T1055_012", "T1055_013", "T1055_014", "T1055_015"]
 
@@ -34,6 +34,8 @@ T1055_001 = [
     "windows-sys/Win32_System_Diagnostics_Debug",
     "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_SystemServices",
+    "windows-sys/Win32_System_SystemInformation",
     "windows-sys/Win32_System_Threading"
 ]
 
@@ -87,6 +89,11 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 [[example]]
 name = "T1055_001_Classic_DLL"
 path = "examples/T1055_001/classic_dll.rs"
+required-features = ["T1055_001"]
+
+[[example]]
+name = "T1055_001_Reflective_DLL"
+path = "examples/T1055_001/reflective_dll.rs"
 required-features = ["T1055_001"]
 
 [[example]]

@@ -122,6 +122,7 @@ pub enum DynamicLinkLibrary {
     /// Standard `LoadLibraryA` injection.
     #[default]
     Classic,
+    Reflective,
 }
 
 /// Configuration options for T1055.002 (PE Injection).

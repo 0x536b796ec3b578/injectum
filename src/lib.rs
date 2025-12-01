@@ -89,7 +89,7 @@
 //!
 //! ```toml
 //! [features]
-//! default   = []
+//! default   = ["tracing"]
 //! tracing   = [] # Enable structured logging via the `tracing` crate
 //! full      = [] # Activates all techniques at once
 //!
