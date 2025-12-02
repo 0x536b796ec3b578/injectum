@@ -133,6 +133,28 @@ impl Payload {
         // 3. Check for IMAGE_FILE_DLL (0x2000)
         (characteristics & 0x2000) != 0
     }
+
+    /// Returns the file path if this payload is backed by a file on disk (DLL or Executable).
+    pub fn as_file_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Payload::DllFile { file_path, .. } => file_path.as_deref(),
+            Payload::Executable { file_path, .. } => file_path.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns the raw bytes of the payload content, if available.
+    ///
+    /// This is useful for techniques that require raw access, such as manual mapping or shellcode execution.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Payload::Shellcode { bytes, .. } => Some(bytes),
+            Payload::DllFile { image_bytes, .. } => image_bytes.as_deref(),
+            Payload::Executable { image_bytes, .. } => image_bytes.as_deref(),
+            Payload::Blob { data, .. } => Some(data),
+            _ => None,
+        }
+    }
 }
 
 /// Metadata used to enforce Operational Security (OpSec) and provenance checks.

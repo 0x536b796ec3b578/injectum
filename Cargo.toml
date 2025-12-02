@@ -1,6 +1,6 @@
 [package]
 name = "injectum"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Skynõx <0x536b796ec3b578@proton.me>"]
 edition = "2024"
 repository = "https://github.com/0x536b796ec3b578/injectum"
@@ -94,6 +94,11 @@ required-features = ["T1055_001"]
 [[example]]
 name = "T1055_001_Reflective_DLL"
 path = "examples/T1055_001/reflective_dll.rs"
+required-features = ["T1055_001"]
+
+[[example]]
+name = "T1055_001_MemoryModule"
+path = "examples/T1055_001/memory_module.rs"
 required-features = ["T1055_001"]
 
 [[example]]
