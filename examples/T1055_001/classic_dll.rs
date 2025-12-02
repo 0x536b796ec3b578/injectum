@@ -10,7 +10,7 @@
 //! ./T1055_001_Classic_DLL.exe <DLL_PATH> [PID]
 //! ```
 //!
-//! If PID is missing, a new 'notepad.exe' process will be spawned and targeted.
+//! If PID is missing, a new 'cmd.exe' process will be spawned and targeted.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
@@ -38,7 +38,7 @@ use injectum::{
     Error, InjectorBuilder, Payload, PayloadMetadata, Result, Target, Technique,
     method::DynamicLinkLibrary,
 };
-use std::{env::args, path::PathBuf, process::Command};
+use std::{env::args, os::windows::process::CommandExt, path::PathBuf, process::Command};
 #[cfg(feature = "tracing")]
 use tracing::{error, info, warn};
 
@@ -102,8 +102,10 @@ fn parse_args() -> Result<(u32, PathBuf)> {
             ))
         })?
     } else {
-        warn!("No PID provided. Spawning 'notepad.exe' as a target...");
-        let child_process = Command::new("notepad.exe")
+        warn!("No PID provided. Spawning 'cmd.exe' as a target...");
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        let child_process = Command::new("cmd.exe")
+            .creation_flags(DETACHED_PROCESS)
             .spawn()
             .map_err(|e| Error::Validation(format!("Failed to spawn dummy target: {}", e)))?;
         child_process.id()

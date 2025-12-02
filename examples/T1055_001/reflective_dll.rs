@@ -13,7 +13,7 @@
 //! ./T1055_001_Reflective_DLL.exe <DLL_PATH> [PID]
 //! ```
 //!
-//! If PID is missing, a new 'notepad.exe' process will be spawned and targeted.
+//! If PID is missing, a new 'cmd.exe' process will be spawned and targeted.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
