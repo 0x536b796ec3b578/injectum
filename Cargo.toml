@@ -32,6 +32,7 @@ T1055_001 = [
     "dep:windows-sys",
     "windows-sys/Win32_Security",
     "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Diagnostics_ToolHelp",
     "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_System_Memory",
     "windows-sys/Win32_System_SystemServices",
@@ -99,6 +100,11 @@ required-features = ["T1055_001"]
 [[example]]
 name = "T1055_001_MemoryModule"
 path = "examples/T1055_001/memory_module.rs"
+required-features = ["T1055_001"]
+
+[[example]]
+name = "T1055_001_ModuleStomping"
+path = "examples/T1055_001/module_stomping.rs"
 required-features = ["T1055_001"]
 
 [[example]]

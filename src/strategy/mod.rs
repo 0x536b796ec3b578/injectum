@@ -124,6 +124,7 @@ pub enum DynamicLinkLibrary {
     Classic,
     Reflective,
     MemoryModule,
+    ModuleStomping(Option<String>),
 }
 
 /// Configuration options for T1055.002 (PE Injection).

