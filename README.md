@@ -137,7 +137,7 @@ cargo add injectum
 
 Or add the following line to your `Cargo.toml`:
 ```toml
-injectum = "0.2.0"
+injectum = "0.2.3"
 ```
 
 ## Build Instructions
@@ -171,7 +171,7 @@ Injectum aims to provide a modular, feature‑gated implementation of the full s
 
 | ID | Technique Name |Implemented Methods | 
 | :--- | :--- | :--- |
-| [T1055.001](https://attack.mitre.org/techniques/T1055/001/) | Dynamic-link Library Injection | `Classic`, `Reflective`, `MemoryModule` |
+| [T1055.001](https://attack.mitre.org/techniques/T1055/001/) | Dynamic-link Library Injection | `Classic`, `Reflective`, `MemoryModule`, `ModuleStomping` |
 | [T1055.002](https://attack.mitre.org/techniques/T1055/002/) | Portable Executable Injection | `RemoteThread` |
 | [T1055.003](https://attack.mitre.org/techniques/T1055/003/) | Thread Execution Hijacking | [ ] |
 | [T1055.004](https://attack.mitre.org/techniques/T1055/004/) | Asynchronous Procedure Call | `Sniper`, `Spray`, `EarlyBird` |
