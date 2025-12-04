@@ -45,7 +45,10 @@ T1055_002 = [
     "dep:windows-sys",
     "windows-sys/Win32_Security",
     "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_LibraryLoader",
     "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_SystemServices",
+    "windows-sys/Win32_System_SystemInformation",
     "windows-sys/Win32_System_Threading"
 ]
 T1055_003 = []
@@ -106,6 +109,11 @@ required-features = ["T1055_001"]
 name = "T1055_001_ModuleStomping"
 path = "examples/T1055_001/module_stomping.rs"
 required-features = ["T1055_001"]
+
+[[example]]
+name = "T1055_002_Manual_Mapping"
+path = "examples/T1055_002/manual_mapping.rs"
+required-features = ["T1055_002"]
 
 [[example]]
 name = "T1055_002_Remote_Thread"

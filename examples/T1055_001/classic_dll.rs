@@ -10,65 +10,58 @@
 //! ./T1055_001_Classic_DLL.exe <DLL_PATH> [PID]
 //! ```
 //!
-//! If PID is missing, a new 'cmd.exe' process will be spawned and targeted.
+//! * DLL_PATH : Path to the DLL to inject.
+//! * PID      : (Optional) Process ID. If missing, a new 'notepad.exe' process is spawned.
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
     #[macro_export]
-    macro_rules! error {
-        ($($arg:tt)*) => {
-            let _ = format_args!($($arg)*);
-        };
-    }
+    macro_rules! error { ($($arg:tt)*) => { let _ = format_args!($($arg)*); }; }
     #[macro_export]
-    macro_rules! info {
-        ($($arg:tt)*) => {
-            let _ = format_args!($($arg)*);
-        };
-    }
+    macro_rules! info { ($($arg:tt)*) => { let _ = format_args!($($arg)*); }; }
     #[macro_export]
-    macro_rules! warn {
-        ($($arg:tt)*) => {
-            let _ = format_args!($($arg)*);
-        };
-    }
+    macro_rules! warn { ($($arg:tt)*) => { let _ = format_args!($($arg)*); }; }
 }
 
 use injectum::{
     Error, InjectorBuilder, Payload, PayloadMetadata, Result, Target, Technique,
     method::DynamicLinkLibrary,
 };
-use std::{env::args, os::windows::process::CommandExt, path::PathBuf, process::Command};
+use std::{env::args, path::PathBuf, process::Command};
 #[cfg(feature = "tracing")]
 use tracing::{error, info, warn};
 
 fn main() {
     if let Err(e) = run() {
-        error!("{}", e);
+        error!("Error: {}", e);
     }
 }
 
 fn run() -> Result<()> {
     setup_logging();
     let (process_id, dll_path) = parse_args()?;
+
     info!("------------------------------------------------");
     info!("Target Process ID : {}", process_id);
-    info!("Technique         : T1055.001 (Classic)");
-    info!("Payload           : {:?}", &dll_path);
+    info!("Technique         : T1055.001 (Classic DLL Injection)");
+    info!("Payload           : {:?}", dll_path);
     info!("------------------------------------------------");
-    inject_dll(process_id, dll_path)?;
-    info!("Injection completed.");
+
+    inject_classic(process_id, dll_path)?;
+
+    info!("Success: Injection completed.");
     Ok(())
 }
 
-/// Performs the DLL injection using Injectum.
-fn inject_dll(process_id: u32, dll_path: PathBuf) -> Result<()> {
+/// Performs Classic DLL Injection.
+fn inject_classic(process_id: u32, dll_path: PathBuf) -> Result<()> {
     let payload = Payload::DllFile {
         file_path: Some(dll_path),
         image_bytes: None,
         metadata: PayloadMetadata::default(),
     };
     let technique = Technique::T1055_001(DynamicLinkLibrary::Classic);
+
     InjectorBuilder::new()
         .target(Target::Pid(process_id))
         .technique(technique)
@@ -76,40 +69,37 @@ fn inject_dll(process_id: u32, dll_path: PathBuf) -> Result<()> {
         .execute()
 }
 
-/// Parses CLI arguments and validates the PID and DLL path.
+/// Parses CLI arguments.
 fn parse_args() -> Result<(u32, PathBuf)> {
     let cli_args: Vec<String> = args().collect();
+
     if cli_args.len() < 2 {
         println!("Usage: ./T1055_001_Classic_DLL.exe <DLL_PATH> [PID]");
         return Err(Error::Validation("Missing DLL path.".into()));
     }
-    // 1. Parse DLL Path (Mandatory)
-    let dll_path = PathBuf::from(&cli_args[1]).canonicalize().map_err(|e| {
-        Error::Validation(format!(
-            "DLL path invalid or inaccessible '{}': {}",
-            &cli_args[1], e
-        ))
-    })?;
+
+    // 1. Parse DLL Path
+    let dll_path = PathBuf::from(&cli_args[1])
+        .canonicalize()
+        .map_err(|e| Error::Validation(format!("Invalid DLL path '{}': {}", &cli_args[1], e)))?;
+
     if !dll_path.exists() {
-        return Err(Error::Validation("File does not exist.".into()));
+        return Err(Error::Validation("DLL file does not exist.".into()));
     }
+
     // 2. Parse PID (Optional)
     let process_id = if cli_args.len() > 2 {
-        cli_args[2].parse::<u32>().map_err(|_| {
-            Error::Validation(format!(
-                "Invalid PID '{}'. Must be a positive integer.",
-                cli_args[2]
-            ))
-        })?
+        cli_args[2]
+            .parse::<u32>()
+            .map_err(|_| Error::Validation("Invalid PID. Must be a positive integer.".into()))?
     } else {
-        warn!("No PID provided. Spawning 'cmd.exe' as a target...");
-        const DETACHED_PROCESS: u32 = 0x00000008;
-        let child_process = Command::new("cmd.exe")
-            .creation_flags(DETACHED_PROCESS)
+        warn!("No PID provided. Spawning 'notepad.exe' as target...");
+        let child = Command::new("notepad.exe")
             .spawn()
-            .map_err(|e| Error::Validation(format!("Failed to spawn dummy target: {}", e)))?;
-        child_process.id()
+            .map_err(|e| Error::Validation(format!("Failed to spawn target: {}", e)))?;
+        child.id()
     };
+
     Ok((process_id, dll_path))
 }
 

