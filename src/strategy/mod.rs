@@ -131,9 +131,9 @@ pub enum DynamicLinkLibrary {
 #[cfg(all(feature = "T1055_002", target_os = "windows"))]
 #[derive(Default)]
 pub enum PortableExecutable {
-    /// Injection via `CreateRemoteThread`.
+    /// Manually maps a PE file from memory, mimicking the Windows loader.
     #[default]
-    RemoteThread,
+    ManualMapping,
 }
 
 /// Configuration options for T1055.003 (Thread Hijacking).
