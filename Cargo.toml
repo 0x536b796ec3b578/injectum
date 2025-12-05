@@ -23,7 +23,7 @@ categories = [
 ]
 
 [features]
-default = ["tracing"]
+default = ["tracing", "T1055_003"]
 tracing = ["dep:tracing"]
 full = ["T1055_001", "T1055_002", "T1055_003", "T1055_004", "T1055_005", "T1055_008", "T1055_009", "T1055_011", "T1055_012", "T1055_013", "T1055_014", "T1055_015"]
 
@@ -51,7 +51,15 @@ T1055_002 = [
     "windows-sys/Win32_System_SystemInformation",
     "windows-sys/Win32_System_Threading"
 ]
-T1055_003 = []
+# T1055.004: Thread Execution Hijacking
+T1055_003 = [
+    "dep:windows-sys",
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Diagnostics_ToolHelp",
+    "windows-sys/Win32_System_Kernel",
+    "windows-sys/Win32_System_Memory",
+    "windows-sys/Win32_System_Threading"
+]
 # T1055.004: Asynchronous Procedure Call
 T1055_004 = [
     "dep:windows-sys",
@@ -116,9 +124,9 @@ path = "examples/T1055_002/manual_mapping.rs"
 required-features = ["T1055_002"]
 
 [[example]]
-name = "T1055_002_Remote_Thread"
-path = "examples/T1055_002/remote_thread.rs"
-required-features = ["T1055_002"]
+name = "T1055_003_Thread_Hijacking"
+path = "examples/T1055_003/thread_hijacking.rs"
+required-features = ["T1055_003"]
 
 [[example]]
 name = "T1055_004_Sniper_APC"
