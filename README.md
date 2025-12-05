@@ -173,7 +173,7 @@ Injectum aims to provide a modular, feature‑gated implementation of the full s
 | :--- | :--- | :--- |
 | [T1055.001](https://attack.mitre.org/techniques/T1055/001/) | Dynamic-link Library Injection | `Classic`, `Reflective`, `MemoryModule`, `ModuleStomping` |
 | [T1055.002](https://attack.mitre.org/techniques/T1055/002/) | Portable Executable Injection | `ManualMapping` |
-| [T1055.003](https://attack.mitre.org/techniques/T1055/003/) | Thread Execution Hijacking | [ThreadHijacking] |
+| [T1055.003](https://attack.mitre.org/techniques/T1055/003/) | Thread Execution Hijacking | `ThreadHijacking` |
 | [T1055.004](https://attack.mitre.org/techniques/T1055/004/) | Asynchronous Procedure Call | `Sniper`, `Spray`, `EarlyBird` |
 | [T1055.005](https://attack.mitre.org/techniques/T1055/005/) | Thread Local Storage | [ ] |
 | [T1055.008](https://attack.mitre.org/techniques/T1055/008/) | Ptrace System Calls | [ ] |
