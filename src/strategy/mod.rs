@@ -142,7 +142,7 @@ pub enum PortableExecutable {
 pub enum ThreadExecutionHijacking {
     /// Suspends thread and updates `EIP`/`RIP` context.
     #[default]
-    Default,
+    ThreadHijacking,
 }
 
 /// Configuration options for T1055.004 (APC Injection).

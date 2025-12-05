@@ -418,7 +418,7 @@ fn finalize_permissions(
     image_bytes: &[u8],
     remote_addr: *mut c_void,
 ) -> Result<()> {
-    // 1. Surgical Wipe (MZ + PE) - Matches T1055.001 OpSec
+    // 1. Surgical Wipe (MZ + PE)
     let zeros_2 = vec![0u8; 2];
     target_process.write_process_memory(remote_addr, &zeros_2)?; // Wipe MZ
 
@@ -813,6 +813,8 @@ impl PeContext {
         None
     }
 }
+
+// ==============================================================================================
 
 struct HandleGuard(HANDLE);
 

