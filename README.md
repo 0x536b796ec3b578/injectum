@@ -137,7 +137,7 @@ cargo add injectum
 
 Or add the following line to your `Cargo.toml`:
 ```toml
-injectum = "0.2.3"
+injectum = "0.2.4"
 ```
 
 ## Build Instructions
